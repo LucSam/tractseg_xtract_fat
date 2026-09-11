@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import nibabel as nib
 import numpy as np
@@ -26,6 +27,7 @@ class WorkflowTests(unittest.TestCase):
         self.folder = Path(self.temp.name)
         self.peaks = self.save("peaks.nii.gz", np.ones((4, 5, 6, 9)))
         self.fod = self.save("wm.nii.gz", np.ones((4, 5, 6, 45)))
+        self.save("t1_brain.nii.gz", np.ones((4, 5, 6)))
 
     def save(self, name: str, data: np.ndarray, shift: float = 0) -> Path:
         path = self.folder / name
@@ -36,7 +38,7 @@ class WorkflowTests(unittest.TestCase):
 
     def cli(self, *args: str, **env: str) -> subprocess.CompletedProcess:
         environment = os.environ.copy()
-        for key in ("OUTPUT_DIR", "ROI_DIR", "DENSITY", "ALGORITHMS", "COMPUTE_FA"):
+        for key in ("OUTPUT_DIR", "ROI_DIR", "DENSITY", "ALGORITHMS", "COMPUTE_FA", "T1", "T1_TO_MNI_PREFIX", "T1_TO_DWI_AFFINE"):
             environment.pop(key, None)
         environment.update(env)
         return subprocess.run(
@@ -102,27 +104,171 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "1/2 streamlines"):
             qc.check_tracks(path, 2)
 
-    def test_endings_follow_world_geometry_and_stay_in_mask(self) -> None:
-        mask = np.zeros((5, 5, 30), dtype=np.uint8)
-        mask[1:4, 1:4, 1:29] = 1
-        path = self.folder / "elongated.nii.gz"
-        affine = np.array([[1.5, 0, 0, -40], [0, -1.5, 0, 20], [0, 0, -2, 80], [0, 0, 0, 1]])
-        nib.save(nib.Nifti1Image(mask, affine), path)
-        begin, end = self.folder / "begin.nii.gz", self.folder / "end.nii.gz"
-        qc.derive_endings(path, begin, end)
-        a, b = np.asarray(qc.load_nifti(begin).dataobj) > 0, np.asarray(qc.load_nifti(end).dataobj) > 0
-        self.assertTrue(a.any() and b.any())
-        self.assertFalse((a & b).any())
-        self.assertTrue(np.all(mask[a | b]))
-        self.assertLess(nib.affines.apply_affine(affine, np.argwhere(a))[:, 2].mean(),
-                        nib.affines.apply_affine(affine, np.argwhere(b))[:, 2].mean())
+    def test_anatomical_endings_preserve_full_cortex_and_separate_seeds(self) -> None:
+        mask = np.zeros((9, 9, 30), dtype=np.uint8)
+        mask[3:6, 3:6, :] = 1
+        atlas = np.zeros_like(mask)
+        atlas[:, :, 1:3] = 1
+        atlas[:, :, 27:29] = 2
+        bundle = self.save("bundle.nii.gz", mask)
+        labels = self.save("cortex.nii.gz", atlas)
+        qc.anatomical_endings(labels, bundle, "left", self.folder)
+        begin = qc.load_nifti(self.folder / "endings_segmentations/FAT_left_b.nii.gz").get_fdata() > 0
+        seed = qc.load_nifti(self.folder / "seed_masks/FAT_left_b.nii.gz").get_fdata() > 0
+        raw = qc.load_nifti(self.folder / "anatomical_rois/FAT_left_b.nii.gz").get_fdata() > 0
+        np.testing.assert_array_equal(raw, atlas == 1)
+        np.testing.assert_array_equal(seed, begin & mask.astype(bool))
+        self.assertGreater(begin.sum(), seed.sum())
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            qc.anatomical_endings(labels, bundle, "left", self.folder)
 
-    def test_endings_reject_disconnected_mask(self) -> None:
-        mask = np.ones((3, 3, 30), dtype=np.uint8)
-        mask[:, :, 15] = 0
+    def test_bundle_preparation_rejects_unrepaired_disconnection(self) -> None:
+        mask = np.zeros((3, 3, 30), dtype=np.uint8)
+        mask[:, :, :5] = 1
+        mask[:, :, 25:] = 1
         path = self.save("disconnected.nii.gz", mask)
+        destination = self.folder / "processed.nii.gz"
         with self.assertRaisesRegex(ValueError, "connected"):
-            qc.derive_endings(path, self.folder / "a.nii.gz", self.folder / "b.nii.gz")
+            qc.prepare_bundle(path, destination)
+        self.assertFalse(destination.exists())
+
+    def test_bundle_preparation_is_bounded_in_physical_space(self) -> None:
+        mask = np.zeros((13, 13, 13), dtype=np.uint8)
+        mask[4:9, 4:9, 4:9] = 1
+        mask[6, 6, 6] = 0
+        affine = np.array([[0, -2, 0, 40], [1, 0, 0, -20], [0, 0, 3, 10], [0, 0, 0, 1]])
+        source, destination = self.folder / "source.nii.gz", self.folder / "processed.nii.gz"
+        nib.save(nib.Nifti1Image(mask, affine), source)
+        before = source.read_bytes()
+        qc.prepare_bundle(source, destination)
+        processed = qc.load_nifti(destination).get_fdata() > 0
+        self.assertEqual(source.read_bytes(), before)
+        self.assertTrue(processed[mask > 0].all())
+        self.assertTrue(processed[6, 6, 6])
+        self.assertFalse(processed[:, :4, :].any())
+        self.assertFalse(processed[:, :, :4].any())
+        self.assertFalse(processed[:3, :, :].any())
+        np.testing.assert_allclose(qc.load_nifti(destination).affine, affine)
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            qc.prepare_bundle(source, destination)
+
+    def test_atlas_labels_use_xml_indices_and_both_sfg_surfaces(self) -> None:
+        atlas = np.zeros((41, 5, 5), dtype=np.uint8)
+        for x, y, label in [(5, 1, 13), (6, 1, 15), (35, 1, 13), (34, 1, 15),
+                            (17, 2, 91), (23, 2, 91), (5, 2, 92), (35, 2, 92)]:
+            atlas[x, y, 2] = label
+        affine = np.diag([3.0, 1.0, 1.0, 1.0])
+        affine[0, 3] = -60
+        path = self.folder / "atlas.nii.gz"
+        nib.save(nib.Nifti1Image(atlas, affine), path)
+        xml = self.folder / "atlas.xml"
+        names = [(12, "Inferior Frontal Gyrus, pars opercularis"),
+                 (14, "Inferior Frontal Gyrus, pars triangularis"),
+                 (90, "Juxtapositional Lobule Cortex (formerly Supplementary Motor Cortex)"),
+                 (91, "Superior Frontal Gyrus")]
+        xml.write_text('<atlas><data>' + ''.join(
+            f'<label index="{i}">{name}</label>' for i, name in names) + '</data></atlas>')
+        out = self.folder / "extracted.nii.gz"
+        qc.make_atlas_labels(path, xml, out)
+        labels = qc.load_nifti(out).get_fdata()
+        self.assertEqual(labels[5, 1, 2], 1)
+        self.assertEqual(labels[35, 1, 2], 3)
+        self.assertEqual(labels[17, 2, 2], 2)
+        self.assertEqual(labels[23, 2, 2], 4)
+        self.assertEqual(labels[5, 2, 2], 2)
+        self.assertEqual(labels[35, 2, 2], 4)
+
+    def test_probability_mask_rejects_percentages_nan_and_empty(self) -> None:
+        for value in (50.0, np.nan, -0.1, 0.0):
+            with self.subTest(value=value):
+                source = self.save("probability.nii.gz", np.full((5, 5, 5), value))
+                with self.assertRaises(ValueError):
+                    qc.probability_bundle(source, self.folder / "raw.nii.gz", self.folder / "final.nii.gz")
+                self.assertFalse((self.folder / "final.nii.gz").exists())
+
+    def test_probability_mask_records_small_islands_and_preserves_main_support(self) -> None:
+        data = np.zeros((15, 15, 15))
+        data[3:9, 3:9, 3:9] = 0.06
+        data[13, 13, 13] = 0.1
+        source = self.save("probability.nii.gz", data)
+        original, final = self.folder / "raw.nii.gz", self.folder / "final.nii.gz"
+        qc.probability_bundle(source, original, final)
+        raw = qc.load_nifti(original).get_fdata() > 0
+        processed = qc.load_nifti(final).get_fdata() > 0
+        self.assertTrue(raw[13, 13, 13])
+        self.assertFalse(processed[13, 13, 13])
+        self.assertTrue(processed[3:9, 3:9, 3:9].all())
+        self.assertEqual(qc.ndi.label(processed)[1], 1)
+        main = data.copy() > 0
+        main[13, 13, 13] = False
+        self.assertTrue((~processed | qc.dilate_mm(main, np.ones(3), 3.0)).all())
+        self.assertTrue((self.folder / "final.json").is_file())
+
+    def test_probability_mask_rejects_major_disconnection_before_writing(self) -> None:
+        data = np.zeros((15, 15, 15))
+        data[1:4, 1:4, 1:4] = 0.1
+        data[10:13, 10:13, 10:13] = 0.1
+        source = self.save("probability.nii.gz", data)
+        with self.assertRaisesRegex(ValueError, "Major disconnected"):
+            qc.probability_bundle(source, self.folder / "raw.nii.gz", self.folder / "final.nii.gz")
+        self.assertFalse((self.folder / "raw.nii.gz").exists())
+
+    def test_atlas_download_cache_rejects_checksum_mismatch(self) -> None:
+        cache = self.folder / "cache.zip"
+        cache.write_bytes(b"incorrect download")
+        with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+            qc.checked_archive(cache, "https://example.invalid/unused", "0" * 64)
+
+    def test_hcp_registration_does_not_reuse_fsl_mni_transform(self) -> None:
+        fsl = self.folder / "fsl"
+        for relative in ("data/atlases/HarvardOxford/HarvardOxford-cort-maxprob-thr25-1mm.nii.gz",
+                         "data/atlases/HarvardOxford-Cortical.xml",
+                         "data/standard/MNI152_T1_1mm_brain.nii.gz"):
+            path = fsl / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+        mni_prefix = str(self.folder / "FSLMNI_")
+        for suffix in ("0GenericAffine.mat", "1InverseWarp.nii.gz"):
+            Path(mni_prefix + suffix).touch()
+        rigid = self.folder / "rigid.mat"
+        rigid.touch()
+        template = self.folder / "ICBM2009a.nii.gz"
+        out = self.folder / "registered"
+        commands = []
+
+        def run(command: list[str], **kwargs: object) -> None:
+            commands.append(command)
+            if command[0] == "antsRegistrationSyNQuick.sh":
+                prefix = command[command.index("-o") + 1]
+                for suffix in ("0GenericAffine.mat", "1InverseWarp.nii.gz"):
+                    Path(prefix + suffix).touch()
+
+        with patch.object(qc, "hcp_resources", return_value=template), \
+                patch.object(qc, "make_atlas_labels"), patch.object(qc.subprocess, "run", side_effect=run):
+            qc.atlas_to_subject(self.folder / "t1_brain.nii.gz", self.fod, fsl, out,
+                                mni_prefix=mni_prefix, dwi_affine=rigid)
+        registration = [c for c in commands if c[0] == "antsRegistrationSyNQuick.sh"]
+        self.assertEqual(len(registration), 1)
+        self.assertEqual(registration[0][registration[0].index("-f") + 1], str(template))
+        bundle_warps = [c for c in commands if any("Frontal_Aslant_Tract_" in x for x in c)]
+        self.assertEqual(len(bundle_warps), 2)
+        for command in bundle_warps:
+            self.assertEqual(command[-6:], ["-t", str(rigid), "-t",
+                             f"[{out / 'T1toICBM2009a_0GenericAffine.mat'},1]", "-t",
+                             str(out / "T1toICBM2009a_1InverseWarp.nii.gz")])
+            self.assertEqual(command[command.index("-n") + 1], "Linear")
+            self.assertNotIn(mni_prefix + "1InverseWarp.nii.gz", command)
+
+    def test_anatomical_endings_reject_empty_overlap_before_writing(self) -> None:
+        atlas = np.zeros((20, 5, 30), dtype=np.uint8)
+        atlas[:2, :, :3] = 1
+        atlas[:2, :, 27:] = 2
+        mask = np.zeros_like(atlas)
+        mask[15:, :, :] = 1
+        labels, bundle = self.save("atlas.nii.gz", atlas), self.save("bundle.nii.gz", mask)
+        with self.assertRaisesRegex(ValueError, "does not reach"):
+            qc.anatomical_endings(labels, bundle, "left", self.folder)
+        self.assertFalse((self.folder / "endings_segmentations").exists())
 
     def test_endpoint_filter_rejects_fragments_and_wrong_endpoints(self) -> None:
         mask = np.ones((3, 3, 20), dtype=np.uint8)
@@ -198,7 +344,8 @@ class WorkflowTests(unittest.TestCase):
         result = self.cli("dry-run", str(self.folder), OUTPUT_DIR=str(out))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(out.exists())
-        self.assertIn("--tract_definition xtract", result.stdout)
+        self.assertIn("probability-bundle", result.stdout)
+        self.assertNotIn("+ TractSeg ", result.stdout)
         self.assertNotIn("--output_type TOM", result.stdout)
         self.assertIn("FAT_right.tck", result.stdout)
 
@@ -206,6 +353,32 @@ class WorkflowTests(unittest.TestCase):
         result = self.cli("segment", str(self.folder), OUTPUT_DIR=str(self.folder))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Output already exists", result.stderr)
+
+    def test_system_bash_allows_automatic_registration_without_cached_transforms(self) -> None:
+        environment = os.environ.copy()
+        environment.update(T1_TO_MNI_PREFIX="", T1_TO_DWI_AFFINE="", ROI_DIR="", ALGORITHMS="iFOD2")
+        result = subprocess.run(
+            ["/bin/bash", str(ROOT / "tractseg_xtract_fat.sh"), "dry-run", str(self.folder)],
+            env=environment, text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("atlas-to-subject", result.stdout)
+        self.assertNotIn("--mni-prefix", result.stdout)
+        self.assertNotIn("--dwi-affine", result.stdout)
+
+    def test_mif_fod_is_converted_for_anatomical_registration(self) -> None:
+        mif = self.folder / "wm.mif"
+        subprocess.run(["mrconvert", str(self.fod), str(mif), "-quiet"], check=True)
+        self.fod.unlink()
+        result = self.cli("dry-run", str(self.folder))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        commands = [shlex.split(line[2:]) for line in result.stdout.splitlines() if line.startswith("+ ")]
+        registration = next(cmd for cmd in commands if "atlas-to-subject" in cmd)
+        reference = registration[registration.index("--reference") + 1]
+        conversion = next(cmd for cmd in commands if cmd[0] == "mrconvert" and reference in cmd)
+        self.assertEqual(conversion[1], str(mif))
+        self.assertIn("-coord", conversion)
+        self.assertTrue(reference.endswith(".nii.gz"))
 
     def test_tracking_uses_only_the_bundle_mask(self) -> None:
         self.save("mask.nii.gz", np.ones((4, 5, 6)))
@@ -224,7 +397,8 @@ class WorkflowTests(unittest.TestCase):
         generators = [cmd for cmd in commands if cmd[0] == "tckgen"]
         for cmd in generators:
             self.assertEqual(cmd.count("-include"), 2)
-            self.assertIn("-stop", cmd)
+            self.assertNotIn("-stop", cmd, "Allow propagation beyond the first ROI contact.")
+            self.assertNotIn("-seed_unidirectional", cmd, "Grow both halves from an interior seed.")
         filters = [cmd for cmd in commands if "filter-tracks" in cmd]
         self.assertEqual(len(filters), len(generators))
         for cmd in filters:
@@ -235,8 +409,8 @@ class WorkflowTests(unittest.TestCase):
         for cmd in generators:
             self.assertEqual(cmd.count("-include"), 2)
             self.assertEqual(cmd.count("-mask"), 1)
-            self.assertIn("-seed_unidirectional", cmd)
-            self.assertIn("-stop", cmd)
+            self.assertNotIn("-seed_unidirectional", cmd)
+            self.assertNotIn("-stop", cmd)
 
     def test_bad_tracking_parameters_rejected(self) -> None:
         result = self.cli("check", str(self.folder), MIN_LENGTH="200", MAX_LENGTH="100")
@@ -287,9 +461,14 @@ class WorkflowTests(unittest.TestCase):
         script = self.folder / "fat_simple.sh"
         shutil.copyfile(ROOT / "fat_simple.sh", script)
         mask = self.save("long_mask.nii.gz", np.ones((3, 3, 20)))
-        begin, end = self.folder / "begin.nii.gz", self.folder / "end.nii.gz"
+        labels = np.zeros((3, 3, 20))
+        labels[:, :, :3] = 1
+        labels[:, :, 17:] = 2
+        atlas = self.save("native_atlas.nii.gz", labels)
+        begin = self.folder / "endings_segmentations/FAT_left_b.nii.gz"
+        end = self.folder / "endings_segmentations/FAT_left_e.nii.gz"
         command = ["bash", "-c", 'source "$1"; shift; fat_qc "$@"', "test", str(script)]
-        result = subprocess.run(command + ["endings", str(mask), str(begin), str(end)],
+        result = subprocess.run(command + ["endings", str(atlas), str(mask), "left", str(self.folder)],
                                 cwd=self.folder, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         source, out = self.folder / "input.tck", self.folder / "output.tck"

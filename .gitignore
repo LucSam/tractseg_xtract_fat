@@ -2,6 +2,7 @@
 /mri/
 /results/
 /weights/
+/atlases/
 /mri_manifest.csv
 /fat_output/
 **/tractseg_xtract_fat_output/

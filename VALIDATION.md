@@ -2,147 +2,187 @@
 
 **Workflow author: Lucius Fekonja**
 
-## Current endpoint-constrained workflow
+## Current run
 
-The current scripts require each streamline to start and end in opposite end
-regions, as well as remaining entirely inside the bundle mask. End regions are
-computed from the terminal 15% of the mask's principal axis in physical space.
-They are geometric ROIs, not independently labelled IFG/SMA cortex.
+The current implementation replaces the TractSeg/XTRACT bundle boundary with
+registered **HCP1065 population-probability FAT masks**. It uses Harvard-Oxford
+IFG pars opercularis/triangularis and SFG plus SMA as cortical targets, with a
+3 mm endpoint margin. Bundle processing uses a 5% probability threshold, the
+largest component (at least 95% of threshold support), a bounded 3 mm margin
+and Gaussian sigma 1 mm.
 
-The revised tracking and filtering commands were tested on the already computed
-individual masks and FODs; model inference was unchanged and was not repeated.
-The local outputs are under `results/connected_strict/`.
+Current local outputs: **`results/hcp1065_fat/`**. The complete standalone run
+finished with **exit 0** and `SUCCESS`. An independently invoked post-run check
+of all four saved tractograms also finished with **exit 0**.
 
-| Right FAT algorithm | Candidates | Final streamlines | Mask violations | Wrong endpoint pairs |
+The HCP1065 registration to **ICBM2009a nonlinear asymmetric T1** was estimated
+for this individual during this validation. Existing transforms from the same
+subject were explicitly reused for Harvard-Oxford/FSL MNI152 and T1-to-DWI.
+The FSL MNI152 warp was not used for the HCP1065 probabilities. Template/T1
+orthogonal views and native-space mask overlays were inspected. Whole-brain
+support Dice between the registered T1 and ICBM template was 0.978; this checks
+global alignment and does not validate local cortical/tract alignment.
+
+A stable copy of the standalone script was executed. The final distributed file
+has the same executable body; two atlas-attribution comments were subsequently
+added to its shell header. Source hashes and that comparison are recorded in
+`tracking_validation.json`.
+
+## Saved tractograms
+
+| Hemisphere | Algorithm | Complete streamlines | Outside processed mask | Incorrect endpoint pairs |
+| --- | --- | ---: | ---: | ---: |
+| Left | iFOD2 | 2000 | 0 | 0 |
+| Left | SD_STREAM | 2000 | 0 | 0 |
+| Right | iFOD2 | 2000 | 0 | 0 |
+| Right | SD_STREAM | 2000 | 0 | 0 |
+
+The checks inspect every stored vertex and the voxels crossed by every connecting
+segment. The first and last points must lie in opposite expanded cortical regions.
+Whole tracks failing either condition are discarded; none are clipped, joined,
+bent or duplicated. The saved files establish complete geometric connections
+under these constraints, not anatomical completeness or correctness.
+
+## Width compared with the previous XTRACT run
+
+The previous comparator is `results/bidirectional_fat/`: its tracking was already
+bidirectional and used the same FODs, cutoff 0.05 and streamline target. The new
+run changes both the bundle prior and cortical target definition. This is not a
+controlled comparison of atlas choice alone.
+
+Anterior–posterior width below is the **5th-to-95th percentile range of streamline
+point y-coordinates**, in the same native world coordinate system. It measures
+spatial spread, not streamline length.
+
+| Hemisphere / algorithm | Previous AP width (mm) | HCP1065 AP width (mm) | Previous median length (mm) | HCP1065 median length (mm) |
 | --- | ---: | ---: | ---: | ---: |
-| iFOD2 | 4000 | 2000 | 0 | 0 |
-| SD_STREAM | 4000 | 2000 | 0 | 0 |
+| Left iFOD2 | 25.38 | 34.58 | 76.17 | 89.76 |
+| Right iFOD2 | 22.69 | 34.36 | 80.90 | 83.89 |
+| Left SD_STREAM | 21.37 | 28.20 | 73.35 | 84.15 |
+| Right SD_STREAM | 17.44 | 36.80 | 77.25 | 76.80 |
 
-The right end regions contain 222 beginning and 339 ending voxels; the left
-regions contain 85 and 371 voxels. The original masks are unchanged. The README
-preview now uses the revised right iFOD2 result.
+**The additional width is predominantly posterior.** For right iFOD2 the point
+range changes from y=25.02–47.71 mm to 12.31–46.67 mm. The manual reference covers
+25.77–70.57 mm by the same measure. Thus the new reconstruction is broader, but
+does not recover the reference's most anterior extension.
 
-The left side produced **zero connecting candidates with a limit of two million
-seed attempts** using the same iFOD2 parameters and original mask. The filter
-reported `Only 0/2000 valid streamlines` and wrote neither a final left tractogram
-nor a global `SUCCESS` marker. An earlier 50,000-seed probe also found none. End regions prevent
-partial tracks being reported as complete, but cannot manufacture a missing
-FOD-supported route inside the mask. The public workflow does not automatically
-expand the mask, lower the cutoff, join fragments, or fall back to partial tracks.
+## Manual right reference
 
-A separate exploratory mask-expansion test did not change the production masks
-or scripts. Any mask correction needs individual anatomical review. The tumour
-is on the right according to the dataset owner; the left failure is not evidence
-of a tumour-related tract interruption.
+The author's `mri/fat_sd.tck` contains **2000 iFOD2** streamlines at cutoff 0.1,
+with manual seed, inclusion and exclusion ROIs, without a bundle mask. It is
+right-sided; the filename does not identify the tracking algorithm. Median
+length is 78.79 mm. It is a useful comparator, not an independent anatomical
+ground truth, and it cannot validate the left side.
 
-## Earlier mask-only outputs
+| Right mask | Whole reference streamlines contained | Median reference length fraction inside |
+| --- | ---: | ---: |
+| Previous processed XTRACT | 236 / 2000 | 70.9% |
+| New processed HCP1065 | 571 / 2000 | 90.2% |
 
-Before endpoint constraints were added, both workflows were run end to end
-with the local example dataset using TractSeg 2.9 and MRtrix 3.0.4-153-g4040c17b, with four threads.
+Whole-track containment was checked exactly. Length fractions were sampled at
+0.25 mm along each reference streamline. The improvement is substantial, but
+1429 reference tracks still leave the HCP1065 mask somewhere. The current right
+tracking mask extends to anterior y=61.90 mm; the full manual tractogram reaches
+y=92.93 mm. The workflow was not expanded to encompass that entire manual result.
 
-| Local output directory | Algorithms | Streamlines per hemisphere/algorithm | Mask violations |
-| --- | --- | ---: | ---: |
-| `results/simple/` | iFOD2, SD_STREAM | 2000 | 0 |
-| `results/extended/` | iFOD2, SD_STREAM, FACT | 2000 | 0 |
+## Mask topology and volumes
 
-Validation covered stored vertices and every voxel traversed by the connecting
-line segments. A separate dense sampling check, with a maximum spacing of 0.02
-voxel, found zero outside points among 7,233,879 sampled points in the simple run.
+| Hemisphere | Raw 5% volume (ml) | Raw components (6-neighbour) | Discarded island voxels | Final volume (ml) | Final components | Final enclosed cavity voxels |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Left | 50.585 | 2 | 137 | 91.047 | 1 | 2 |
+| Right | 33.861 | 3 | 19 | 65.384 | 1 | 1 |
 
-The extended workflow additionally produced 2000 finite mean FA values per
-hemisphere and algorithm. Its final density maps contained no occupied voxels
-outside the bundle masks. Both runs exited with code 0 and wrote `SUCCESS`.
+The retained main components contain 99.09% and 99.81% of the thresholded voxels.
+Final masks are face-connected. The two left and one right enclosed voxels remain
+because filling is limited by the explicit physical distance bound; the masks
+are therefore **not described as cavity-free**. Cavities occupy 6.75 mm³ left and
+3.375 mm³ right. A connected mask can also contain tunnels and narrow passages.
 
-These MRI-derived outputs are stored locally and are excluded from Git. This
-report summarises the checks; the repository does not distribute the dataset.
+These are broad **tracking support masks**, not estimates of individual tract
+volume. The previous processed XTRACT volumes were 12.768 ml left and 15.390 ml
+right. This large change must be considered when interpreting extra trajectories.
+The final hard containment mask is the processed mask, not the raw atlas threshold.
 
-## Comparison of the earlier workflows
+An initial HCP1065 run with a 1.5 mm margin yielded few left connections and was
+stopped before completion. A 50,000-seed probe using the whole mask produced only
+15 candidates. Keeping the same cortical constraints and increasing the mask
+margin to 3 mm produced 200 candidates within 7455 seed attempts in a bounded
+probe. The final bilateral workflow uses 3 mm; it does not silently retry larger
+margins or weaker thresholds after failure. These exploratory observations on one
+subject do not establish an optimal threshold or margin for other patients.
 
-The two runs produced exactly identical FAT segmentations: 2012 voxels on the
-left and 2526 on the right, with identical image geometry. The TCK files differ
-because seed positions are random and iFOD2 additionally samples directions
-probabilistically. Those earlier scripts used the same default iFOD2/SD_STREAM
-parameters and the same final containment filter, without mandatory endpoint checks.
+## Cortical target volumes
 
-FACT, density maps, and optional FA summaries are additional features of the
-extended workflow, rather than outputs of the simple script.
+All volumes are measured in the individual's 1.5 mm diffusion grid. `_b` is IFG
+pars opercularis/triangularis; `_e` is SFG plus SMA. Full cortical regions are saved
+before dilation, and only separate seed masks are intersected with the bundle.
 
-## Local example: left FAT discontinuity
-
-The README preview displays the **right FAT only**. The left reconstruction in
-this tumour example appears interrupted. Both binary bundle masks are single
-connected components even under face-only (6-neighbour) connectivity, so the
-appearance cannot be explained by a disconnected segmentation alone.
-
-An exploratory tracking comparison used two regions within the left bundle
-mask: its lateral portion at world RAS x < -38 mm and its medial portion at
-x > -24 mm. These are diagnostic coordinate-based regions, not validated
-IFG/SMA endpoint ROIs. Neither of the original 2000-streamline left iFOD2 and
-SD_STREAM outputs contained a streamline visiting both regions.
-
-Two additional iFOD2 runs generated 4000 candidates each with the workflow's
-seed mask, length limits, cutoff, and other tracking settings. Only the tracking
-boundary mask was omitted in the second run; no final containment filter was
-applied before this comparison.
-
-| Tracking boundary | Candidates | Visiting both regions | Connecting segment entirely inside the bundle mask |
+| Region | Registered cortex (ml) | Cortex + 3 mm (ml) | Intersection with tracking mask (ml) |
 | --- | ---: | ---: | ---: |
-| Left FAT mask | 4000 | 0 | 0 |
-| No boundary mask | 4000 | 88 | 0 |
+| Left b | 10.020 | 20.260 | 14.273 |
+| Left e | 26.251 | 49.542 | 29.714 |
+| Right b | 8.147 | 16.787 | 11.418 |
+| Right e | 24.425 | 46.285 | 23.038 |
 
-These stochastic runs support a contribution from the tracking boundary to the
-missing connection. The whole-track filter does not split streamlines, and the
-masked candidates already lacked connections before filtering. Unrestricted
-connections are not evidence of anatomically correct FAT fibres. This comparison
-does not establish whether tumour, oedema, FOD estimation, or segmentation
-accounts for the mismatch between candidate paths and the bundle mask. It also
-does not demonstrate anatomical tract destruction. Counts and containment alone
-do not establish a complete FAT reconstruction.
+For context, existing standard TractSeg endpoint masks measured in this same
+example had full b/e volumes of 12.842/8.569 ml for left UF, 14.118/10.449 ml for
+left SLF III, and 17.418/6.956 ml for left CST. These are different tracts; identical
+absolute volumes would not be expected. The new FAT targets represent complete
+cortical atlas regions rather than the earlier geometric caps.
 
-## Automated checks
+The broader SFG region includes medial and dorsal anatomy, but does not reproduce
+the custom cortical parcels in [Tagliaferri et al. (2024)](https://doi.org/10.1007/s00429-024-02778-4).
+Expanded ROI contact does not prove that a streamline terminates in cortical grey
+matter itself. No learned FAT endpoint model or TOM is used.
 
-- 27 regression tests passed.
-- ShellCheck and Ruff reported no issues.
-- mypy reported no type errors.
-- Tests cover mask-union errors, outside vertices, segments crossing mask holes,
-  very short diagonal boundary crossings, oblique image geometry, grid mismatches,
-  NaN handling, and insufficient accepted streamline counts.
-- New checks cover end-region generation in flipped/oblique world coordinates,
-  disconnected masks, overlapping ROIs, fragments, tracks that only visit ROIs
-  internally, reversed endpoint order, and standalone end-region CLI usage.
+## Review files and automated verification
+
+In `results/hcp1065_fat/`:
+
+- `comparison_3d.html`: self-contained, rotatable viewer with both sides, iFOD2,
+  SD_STREAM, previous XTRACT tracks and the manual right reference. It displays
+  500 of each file's 2000 streamlines; source TCK files are unchanged. Initial
+  anterior view: anatomical right appears on the left of the screen.
+- `bilateral_front.png`, `left_oblique.png`, `right_oblique.png`, `right_front.png`,
+  `manual_right_oblique.png`: native 3D renders, direction RGB, black background.
+- `tracking_validation.json`, `mask_validation.json`, `roi_qc.csv`,
+  `qc_summary.csv`, `independent_validation.log`: measurements and checks.
+- `work/atlas/registration.json`: transform provenance and actual commands.
+
+Registration and exploratory logs remain in `results/hcp1065_registration/`.
+The incomplete 1.5 mm pilot is separately retained in
+`results/archive/hcp1065_margin1p5_pilot/`; it has no `SUCCESS` marker.
 
 ```bash
 bash tests/verify.sh
 ```
 
-The verification script requires ShellCheck, Ruff, and mypy in addition to the
-runtime dependencies. `SHELLCHECK=/path/to/shellcheck` can select a specific binary.
+Final verification: **37 tests passed; zero ShellCheck/Ruff warnings; zero mypy
+errors; `git diff --check` clean.** Tests include probability scale validation,
+small-island accounting, rejection of major disconnected components, physical
+mask bounds, atlas checksums, separate ICBM/FSL transformation chains, cortical
+label indexing, complete-polyline containment, endpoint pairs, insufficient
+counts, standalone helper embedding, and both shell workflows' tracking commands.
 
-## Standalone distribution
+This validation covers one individual. The tumour is right-sided according to the
+dataset owner; the earlier left reconstruction failure is not evidence of a
+left tumour or anatomical transection. Broader priors and successful geometric
+checks can also admit false-positive trajectories. General applicability, local
+registration near pathology and anterior extended-FAT coverage remain unvalidated.
+Optional FACT, density prediction, FA fitting and external ROI branches have not
+been newly tested on real data in this revision.
 
-`fat_simple.sh` contains its complete Python helper and does not require an
-external `scripts/` directory. A regression test checks that its embedded code
-matches the verified helper used by the extended workflow exactly.
+## Installation tutorial checks
 
-Standalone tests copy only `fat_simple.sh` into a separate directory, validate
-synthetic input images, derive end regions, and filter a TCK file using the
-embedded helper. Saved tracks are checked for count, containment, and opposite
-endpoints. Shell syntax, ShellCheck, Python lint, and type checks pass.
+The publication update adds an eight-step English README tutorial. Its shell
+blocks were parsed with macOS system Bash; the dependency check and input check
+were executed successfully on the existing local installation. Conda dry-runs
+successfully resolved the documented Python/ANTs packages on macOS Intel and the
+combined Python/ANTs/MRtrix3 stack for Linux x86_64. These were package-resolution
+checks, not fresh full installations on both operating systems. FSL and macOS
+MRtrix installer commands were checked against their official instructions.
+No new tractography parameters were changed by the documentation/cleanup update.
 
-The original failed runs and intermediate files were removed during cleanup.
-Thirty-five retained final result files were checked by SHA-256 to confirm they
-were unchanged when moved into the local `results/` directory. Original execution
-paths may still appear in those local logs.
-
-## Limits
-
-The current endpoint-constrained FACT branch and the optional `DENSITY=1`,
-`COMPUTE_FA=1`, and external anatomical ROI branches were not validated on
-additional real data. The FAT model has no learned endpoint
-masks or TOMs, and containment does not establish anatomical completeness or
-endpoint correspondence.
-
-Validation applies to the stored TCK polyline. Smoothing or compression changes
-its trajectory and requires a new check. `tckmap -precise` internally interpolates
-Hermite curves and can introduce outside contributions; the regular density maps
-omit `-precise` and use `-upsample 1` to avoid additional upsampling.
+Old local experiments were moved under `results/archive/`; the current
+`results/hcp1065_fat/`, its registration records and the previous XTRACT comparator
+remain directly accessible. The atlas cache is retained for offline reuse.

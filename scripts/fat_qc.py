@@ -1,14 +1,20 @@
-"""Small input/output checks; no anatomical inference or model reimplementation."""
+"""FAT atlas preparation, bounded mask processing and whole-streamline checks."""
 
 import argparse
 import csv
+import hashlib
+import json
 import math
 from pathlib import Path
+import shlex
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
+from zipfile import ZipFile
 
 import nibabel as nib
 import numpy as np
+from scipy import ndimage as ndi
 
 
 def load_nifti(path: Path) -> nib.Nifti1Image:
@@ -132,45 +138,264 @@ def mask_data(path: Path) -> tuple[np.ndarray, np.ndarray]:
     return data.astype(bool), np.linalg.inv(img.affine)
 
 
-def derive_endings(mask_path: Path, begin_path: Path, end_path: Path) -> None:
-    """Geometric terminal caps; not learned or anatomically labelled endpoints."""
-    mask, _ = mask_data(mask_path)
-    if begin_path.exists() or end_path.exists():
-        raise ValueError("End-region output already exists.")
-    voxels = np.argwhere(mask)
-    unseen = {tuple(point) for point in voxels}
-    stack = [unseen.pop()]
-    while stack:
-        point = stack.pop()
-        for axis in range(3):
-            for step in (-1, 1):
-                neighbour = list(point)
-                neighbour[axis] += step
-                key = tuple(neighbour)
-                if key in unseen:
-                    unseen.remove(key)
-                    stack.append(key)
-    if unseen:
-        raise ValueError("Bundle mask is not face-connected; inspect it before deriving end regions.")
-    image = load_nifti(mask_path)
-    world = nib.affines.apply_affine(image.affine, voxels)
-    _, singular, axes = np.linalg.svd(world - world.mean(axis=0), full_matrices=False)
-    if len(singular) < 2 or singular[0] <= 1.5 * singular[1]:
-        raise ValueError("Mask has no clear long axis for deriving end regions.")
-    direction = axes[0]
-    if direction[2] < 0:
-        direction = -direction
-    projection = (world - world.mean(axis=0)) @ direction
-    span = float(np.ptp(projection))
-    if span < 10:
-        raise ValueError("Mask is too short to derive separated FAT end regions.")
-    selections = (projection <= projection.min() + 0.15 * span,
-                  projection >= projection.max() - 0.15 * span)
-    for path, selected in zip((begin_path, end_path), selections):
-        region = np.zeros(mask.shape, dtype=np.uint8)
-        region[tuple(voxels[selected].T)] = 1
-        nib.save(nib.Nifti1Image(region, image.affine), path)
-        print(f"{path.name}: {int(selected.sum())} voxels; geometric terminal 15% of mask long axis.")
+def image_spacing(img: nib.Nifti1Image) -> np.ndarray:
+    axes = img.affine[:3, :3]
+    spacing = np.linalg.norm(axes, axis=0)
+    directions = axes / spacing
+    if not np.allclose(directions.T @ directions, np.eye(3), atol=1e-4):
+        raise ValueError("Physical dilation requires an orthogonal image grid; resample a sheared grid first.")
+    return spacing
+
+
+def dilate_mm(mask: np.ndarray, spacing: np.ndarray, radius: float) -> np.ndarray:
+    if not math.isfinite(radius) or radius < 0:
+        raise ValueError("Dilation radius must be finite and nonnegative.")
+    if not mask.any():
+        raise ValueError("Cannot dilate an empty region.")
+    return ndi.distance_transform_edt(~mask, sampling=spacing) <= radius + 1e-5
+
+
+def prepare_bundle(source: Path, destination: Path, margin: float = 1.5,
+                   smoothing: float = 1.0) -> None:
+    """Bounded dilation, light binary-mask smoothing, and bounded cavity filling."""
+    if destination.exists():
+        raise ValueError(f"Output already exists: {destination}")
+    if not math.isfinite(smoothing) or smoothing < 0:
+        raise ValueError("Mask smoothing must be finite and nonnegative.")
+    mask, _ = mask_data(source)
+    img = load_nifti(source)
+    spacing = image_spacing(img)
+    bound = dilate_mm(mask, spacing, margin)
+    processed = bound.copy()
+    if smoothing > 0:
+        processed = ndi.gaussian_filter(processed.astype(float), smoothing / spacing) >= 0.5
+    # Preserve all original voxels; never add beyond the explicit distance bound.
+    processed = ndi.binary_fill_holes(processed | mask) & bound
+    if ndi.label(processed)[1] != 1:
+        raise ValueError("Processed bundle is not face-connected; inspect the segmentation before tracking.")
+    nib.save(nib.Nifti1Image(processed.astype(np.uint8), img.affine), destination)
+    print(f"{destination.name}: {int(mask.sum())} -> {int(processed.sum())} voxels; "
+          f"margin {margin:g} mm, smoothing sigma {smoothing:g} mm; original preserved.")
+
+
+def make_atlas_labels(atlas: Path, xml: Path, destination: Path) -> None:
+    """Harvard-Oxford IFG pars opercularis/triangularis and SFG/SMA, per side."""
+    if destination.exists():
+        raise ValueError(f"Output already exists: {destination}")
+    labels = {node.text: int(node.attrib['index']) + 1
+              for node in ET.parse(xml).findall('./data/label')}
+    img = load_nifti(atlas)
+    data = np.asanyarray(img.dataobj)
+    if data.ndim != 3 or not np.isfinite(data).all():
+        raise ValueError("Expected the 3D Harvard-Oxford max-probability label atlas.")
+    result = np.zeros(data.shape, dtype=np.uint8)
+    try:
+        ifg = [labels['Inferior Frontal Gyrus, pars opercularis'],
+               labels['Inferior Frontal Gyrus, pars triangularis']]
+        sfg = [labels['Superior Frontal Gyrus'],
+               labels['Juxtapositional Lobule Cortex (formerly Supplementary Motor Cortex)']]
+    except KeyError as error:
+        raise ValueError("Harvard-Oxford XML is missing the required IFG/SFG/SMA labels.") from error
+    for index, values in ((1, ifg), (2, sfg)):
+        voxels = np.argwhere(np.isin(data, values))
+        world = nib.affines.apply_affine(img.affine, voxels)
+        for sign, offset in ((-1, 0), (1, 2)):
+            selected = voxels[sign * world[:, 0] > 0]
+            result[tuple(selected.T)] = offset + index
+    if set(np.unique(result)) != {0, 1, 2, 3, 4}:
+        raise ValueError("Atlas extraction produced an empty cortical region.")
+    nib.save(nib.Nifti1Image(result, img.affine), destination)
+
+
+def checked_archive(path: Path, url: str, expected: str) -> None:
+    """Download a pinned archive once; reject corrupt or changed upstream files."""
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix('.part')
+        subprocess.run(['curl', '-L', '--fail', '--retry', '2', '-o', str(temporary), url], check=True)
+        if hashlib.sha256(temporary.read_bytes()).hexdigest() != expected:
+            raise ValueError(f"Download checksum mismatch: {url}")
+        temporary.replace(path)
+    if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+        raise ValueError(f"Atlas cache checksum mismatch: {path}")
+
+
+def hcp_resources(folder: Path) -> Path:
+    """HCP1065 probabilities and the matching ICBM2009a asymmetrical T1."""
+    probability = folder / 'hcp1065_probability.zip'
+    template = folder / 'icbm2009a.zip'
+    checked_archive(probability,
+                    'https://github.com/data-others/atlas/releases/download/hcp1065/hcp1065_prob_coverage_nifti.zip',
+                    '4577abce53e05c732a0d52c88f4ee2d63488bb685f664faad2ea44aa90be8e8b')
+    checked_archive(template,
+                    'https://www.bic.mni.mcgill.ca/~vfonov/icbm/2009/mni_icbm152_nlin_asym_09a_nifti.zip',
+                    '188e1706b0ed74a0d1b3a52ad1a2b198814815f70a65f3ded091b7ceb6296a44')
+    # Extract only known members to fixed destinations, never archive-supplied paths.
+    with ZipFile(probability) as archive:
+        for side in ('L', 'R'):
+            name = f'Frontal_Aslant_Tract_{side}.nii.gz'
+            (folder / name).write_bytes(archive.read('prob/' + name))
+    with ZipFile(template) as archive:
+        for suffix in ('', '_mask'):
+            name = f'mni_icbm152_t1_tal_nlin_asym_09a{suffix}.nii'
+            (folder / name).write_bytes(archive.read('mni_icbm152_nlin_asym_09a/' + name))
+        (folder / 'ICBM_COPYING.txt').write_bytes(archive.read('COPYING'))
+    t1 = load_nifti(folder / 'mni_icbm152_t1_tal_nlin_asym_09a.nii')
+    mask = load_nifti(folder / 'mni_icbm152_t1_tal_nlin_asym_09a_mask.nii')
+    brain = folder / 'ICBM2009a_T1_brain.nii.gz'
+    nib.save(nib.Nifti1Image((t1.get_fdata() * (mask.get_fdata() > 0)).astype(np.float32),
+                           t1.affine), brain)
+    return brain
+
+
+def probability_bundle(source: Path, original: Path, destination: Path,
+                       threshold: float = 0.05, margin: float = 3.0) -> None:
+    """Threshold a registered probability prior, drop tiny islands, bound smoothing."""
+    if original.exists() or destination.exists():
+        raise ValueError('Bundle output already exists.')
+    if not math.isfinite(threshold) or not 0 < threshold < 1:
+        raise ValueError('Probability threshold must be between 0 and 1.')
+    img = load_nifti(source)
+    data = img.get_fdata()
+    if data.ndim != 3 or not np.isfinite(data).all() or data.min() < 0 or data.max() > 1:
+        raise ValueError('Expected finite 3D probabilities in [0, 1], not percentages.')
+    raw = data >= threshold
+    components, count = ndi.label(raw)
+    sizes = np.bincount(components.ravel())
+    sizes[0] = 0
+    if count == 0:
+        raise ValueError('Empty probability mask at the selected threshold.')
+    mask = components == sizes.argmax()
+    retained = float(mask.sum() / raw.sum())
+    if retained < 0.95:
+        raise ValueError('Major disconnected atlas components; inspect registration/threshold.')
+    spacing = image_spacing(img)
+    bound = dilate_mm(mask, spacing, margin)
+    processed = ndi.gaussian_filter(bound.astype(float), 1.0 / spacing) >= 0.5
+    processed = ndi.binary_fill_holes(processed | mask) & bound
+    if ndi.label(processed)[1] != 1:
+        raise ValueError('Processed atlas mask is not face-connected.')
+    for path, array in ((original, raw), (destination, processed)):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        nib.save(nib.Nifti1Image(array.astype(np.uint8), img.affine), path)
+    report = {'source': str(source), 'threshold': threshold, 'raw_voxels': int(raw.sum()),
+              'raw_components6': count, 'retained_fraction': retained,
+              'removed_island_voxels': int(raw.sum() - mask.sum()),
+              'tracking_voxels': int(processed.sum()), 'margin_mm': margin, 'smoothing_sigma_mm': 1.0}
+    destination.with_suffix('').with_suffix('.json').write_text(json.dumps(report, indent=2) + '\n')
+    print(json.dumps(report), flush=True)
+
+
+def atlas_to_subject(t1: Path, reference: Path, fsl_dir: Path, out: Path,
+                     mni_prefix: str | None = None, dwi_affine: Path | None = None,
+                     threads: int = 4, atlas_dir: Path = Path('atlases/hcp1065'),
+                     icbm_prefix: str | None = None) -> None:
+    """Register atlas priors through this subject's T1 into the diffusion grid."""
+    if out.exists():
+        raise ValueError(f"Output already exists: {out}")
+    atlas = fsl_dir / "data/atlases/HarvardOxford/HarvardOxford-cort-maxprob-thr25-1mm.nii.gz"
+    xml = fsl_dir / "data/atlases/HarvardOxford-Cortical.xml"
+    template = fsl_dir / "data/standard/MNI152_T1_1mm_brain.nii.gz"
+    for path in (t1, reference, atlas, xml, template):
+        if not path.is_file():
+            raise ValueError(f"Missing anatomical preparation input: {path}")
+    t1_img = load_nifti(t1)
+    if len(t1_img.shape) != 3 or not np.isfinite(t1_img.get_fdata()).all():
+        raise ValueError("T1 must be a finite 3D brain-extracted image of this subject.")
+    icbm_template = hcp_resources(atlas_dir)
+    out.mkdir(parents=True)
+    ref_img = load_nifti(reference)
+    ref_data = np.asanyarray(ref_img.dataobj)
+    if ref_data.ndim == 4:
+        ref_data = ref_data[..., 0]
+    if ref_data.ndim != 3:
+        raise ValueError("Expected a 3D image or 4D FOD reference.")
+    ref = out / "dwi_reference.nii.gz"
+    nib.save(nib.Nifti1Image(ref_data.astype(np.float32), ref_img.affine), ref)
+    make_atlas_labels(atlas, xml, out / "endings_MNI.nii.gz")
+    commands = []
+
+    def run(command: list[str]) -> None:
+        print("+ " + shlex.join(command), flush=True)
+        commands.append(command)
+        subprocess.run(command, check=True)
+
+    if mni_prefix is None:
+        mni_prefix = str(out / "T1toMNI_")
+        run(["antsRegistrationSyNQuick.sh", "-d", "3", "-f", str(template), "-m", str(t1),
+             "-t", "s", "-n", str(threads), "-o", mni_prefix])
+    mni_affine = Path(mni_prefix + "0GenericAffine.mat")
+    inverse_warp = Path(mni_prefix + "1InverseWarp.nii.gz")
+    if dwi_affine is None:
+        dwi_prefix = str(out / "T1toDWI_")
+        run(["antsRegistrationSyNQuick.sh", "-d", "3", "-f", str(ref), "-m", str(t1),
+             "-t", "r", "-n", str(threads), "-o", dwi_prefix])
+        dwi_affine = Path(dwi_prefix + "0GenericAffine.mat")
+    for path in (mni_affine, inverse_warp, dwi_affine):
+        if not path.is_file():
+            raise ValueError(f"Missing subject registration transform: {path}")
+    run(["antsApplyTransforms", "-d", "3", "-i", str(out / "endings_MNI.nii.gz"),
+         "-r", str(ref), "-o", str(out / "endings_native.nii.gz"), "-n", "NearestNeighbor",
+         "-t", str(dwi_affine), "-t", f"[{mni_affine},1]", "-t", str(inverse_warp)])
+    run(["antsApplyTransforms", "-d", "3", "-i", str(t1), "-r", str(ref),
+         "-o", str(out / "t1_dwi.nii.gz"), "-n", "Linear", "-t", str(dwi_affine)])
+    # HCP1065 uses ICBM2009a, not the FSL MNI152 template used by Harvard-Oxford.
+    if icbm_prefix is None:
+        icbm_prefix = str(out / 'T1toICBM2009a_')
+        run(['antsRegistrationSyNQuick.sh', '-d', '3', '-f', str(icbm_template), '-m', str(t1),
+             '-t', 's', '-n', str(threads), '-o', icbm_prefix])
+    icbm_affine = Path(icbm_prefix + '0GenericAffine.mat')
+    icbm_inverse = Path(icbm_prefix + '1InverseWarp.nii.gz')
+    for path in (icbm_affine, icbm_inverse):
+        if not path.is_file():
+            raise ValueError(f'Missing ICBM2009a transform: {path}')
+    for side, name in (('L', 'left'), ('R', 'right')):
+        run(['antsApplyTransforms', '-d', '3', '-i', str(atlas_dir / f'Frontal_Aslant_Tract_{side}.nii.gz'),
+             '-r', str(ref), '-o', str(out / f'FAT_{name}_probability.nii.gz'), '-n', 'Linear',
+             '-t', str(dwi_affine), '-t', f'[{icbm_affine},1]', '-t', str(icbm_inverse)])
+    (out / "registration.json").write_text(json.dumps({
+        "t1": str(t1), "diffusion_reference": str(reference), "atlas": str(atlas),
+        "t1_to_mni_affine": str(mni_affine), "mni_to_t1_warp": str(inverse_warp),
+        "t1_to_dwi_affine": str(dwi_affine), "commands": commands,
+        "bundle_atlas": "HCP1065 probability coverage", "bundle_template": str(icbm_template),
+        "t1_to_icbm2009a_affine": str(icbm_affine), "icbm2009a_to_t1_warp": str(icbm_inverse),
+    }, indent=2) + "\n")
+
+
+def anatomical_endings(atlas: Path, bundle: Path, side: str, out: Path,
+                       radius: float = 3.0) -> None:
+    """Keep full cortical ROIs; save their mask intersection separately for seeding."""
+    same_grid(bundle, atlas)
+    img = load_nifti(atlas)
+    data = np.asanyarray(img.dataobj)
+    if data.ndim != 3 or not np.isin(data, [0, 1, 2, 3, 4]).all():
+        raise ValueError("Expected the registered four-region cortical label image.")
+    mask, _ = mask_data(bundle)
+    offset = {"left": 0, "right": 2}[side]
+    name = f"FAT_{side}"
+    paths = [out / directory / f"{name}_{suffix}.nii.gz"
+             for directory in ("anatomical_rois", "endings_segmentations", "seed_masks")
+             for suffix in ("b", "e")]
+    if any(path.exists() for path in paths):
+        raise ValueError("Anatomical end-region output already exists.")
+    regions = []
+    for index, suffix in enumerate(("b", "e"), start=1):
+        raw = data == offset + index
+        expanded = dilate_mm(raw, image_spacing(img), radius)
+        effective = expanded & mask
+        if not effective.any():
+            raise ValueError(f"{name}_{suffix}: cortical ROI does not reach the bundle; inspect registration.")
+        regions.append((raw, expanded, effective))
+    if (regions[0][2] & regions[1][2]).any():
+        raise ValueError("Anatomical end regions overlap inside the bundle; inspect registration/margins.")
+    for suffix, arrays in zip(("b", "e"), regions):
+        for directory, array in zip(("anatomical_rois", "endings_segmentations", "seed_masks"), arrays):
+            path = out / directory / f"{name}_{suffix}.nii.gz"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            nib.save(nib.Nifti1Image(array.astype(np.uint8), img.affine), path)
+        print(f"{name}_{suffix}: cortex {int(arrays[0].sum())}; "
+              f"with {radius:g} mm margin {int(arrays[1].sum())}; "
+              f"inside tracking mask {int(arrays[2].sum())} voxels.")
 
 
 def load_endings(mask_path: Path | None, paths: tuple[Path, Path] | None) -> tuple[np.ndarray, np.ndarray] | None:
@@ -263,22 +488,48 @@ def check_tracks(path: Path, requested: int, mask_path: Path | None = None,
 def summary(out: Path) -> None:
     with (out / "qc_summary.csv").open("w", newline="") as stream:
         writer = csv.writer(stream)
-        writer.writerow(["bundle", "segmentation_voxels", "segmentation_volume_mm3"])
+        writer.writerow(["bundle", "original_voxels", "tracking_voxels", "tracking_volume_mm3",
+                         "original_components6", "tracking_components6", "original_cavity_voxels"])
         for name in ("FAT_left", "FAT_right"):
             img = load_nifti(out / "bundle_segmentations" / f"{name}.nii.gz")
             voxels = int(np.count_nonzero(np.asanyarray(img.dataobj)))
             volume = voxels * abs(np.linalg.det(img.affine[:3, :3]))
-            writer.writerow([name, voxels, f"{volume:.3f}"])
+            original, _ = mask_data(out / "bundle_segmentations_original" / f"{name}.nii.gz")
+            tracking = np.asanyarray(img.dataobj) > 0
+            writer.writerow([name, int(original.sum()), voxels, f"{volume:.3f}",
+                             ndi.label(original)[1], ndi.label(tracking)[1],
+                             int((ndi.binary_fill_holes(original) & ~original).sum())])
+    with (out / "roi_qc.csv").open("w", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["region", "volume_mm3", "voxels", "voxels_inside_tracking_mask"])
+        for path in sorted((out / "endings_segmentations").glob("*.nii.gz")):
+            img = load_nifti(path)
+            region = np.asanyarray(img.dataobj) > 0
+            name = path.name.rsplit("_", 1)[0]
+            bundle, _ = mask_data(out / "bundle_segmentations" / f"{name}.nii.gz")
+            writer.writerow([path.name, f"{region.sum() * abs(np.linalg.det(img.affine[:3, :3])):.3f}",
+                             int(region.sum()), int((region & bundle).sum())])
     (out / "METHOD.txt").write_text(
-        "Segmentation: TractSeg --tract_definition xtract; fa_l=FAT_left, fa_r=FAT_right.\n"
-        "Optional streamlines: MRtrix with ONE undilated bundle mask; see pipeline.log for ROI constraints.\n"
+        "Bundle prior: HCP1065 population probability coverage, registered via subject T1 using ICBM2009a.\n"
+        "No training, TractSeg inference, or intersection with an XTRACT mask in the default workflow.\n"
+        "Native probability images: work/atlas/FAT_*_probability.nii.gz.\n"
+        "Threshold 0.05 is a workflow default, not a clinically validated FAT boundary.\n"
+        "Raw threshold masks: bundle_segmentations_original; processed masks: bundle_segmentations.\n"
+        "Keep the largest face-connected component only if it contains at least 95% of threshold voxels.\n"
+        "Mask processing: 3 mm bounded margin, Gaussian sigma 1 mm, threshold 0.5; preserve the retained component.\n"
+        "Cavity filling is limited to that margin; disconnected processed masks fail.\n"
+        "Optional streamlines: MRtrix with ONE processed bundle mask; default cutoff 0.05.\n"
         "Whole streamlines leaving the mask are rejected; all vertices AND connecting segments are checked.\n"
+        "Track in both directions from each seed, without stopping at the first complete set of ROI contacts.\n"
         "Tracking requires both endpoints in opposite end regions, in addition to whole-polyline containment.\n"
-        "Default end regions: terminal 15% of the subject mask's physical principal axis; no training.\n"
-        "These geometric end regions are not learned anatomical IFG/SMA segmentations; inspect them individually.\n"
+        "Cortical priors: Harvard-Oxford maxprob thr25 IFG pars opercularis/triangularis and SFG plus SMA.\n"
+        "Cortex uses a separate FSL MNI152 registration; do not interchange its warp with ICBM2009a.\n"
+        "Atlas labels are warped via subject T1 to DWI, then dilated 3 mm; inspect registration individually.\n"
+        "Full cortex labels: anatomical_rois; expanded endpoints: endings_segmentations; mask intersections: seed_masks.\n"
+        "Population cortical labels approximate anatomical targets; they are not individual functional maps.\n"
         "No learned FAT endings or TOMs. Insufficient valid connections cause failure, not a partial final bundle.\n"
         "Mean FA CSVs: one mean per streamline, NOT spatially corresponding along-tract profiles.\n"
-        "Densities from dm_regression are model predictions, not measured streamline counts.\n"
+        "Optional XTRACT dm_regression is a separate comparison, not the HCP1065 tracking mask.\n"
     )
 
 
@@ -299,9 +550,30 @@ def main() -> None:
     prepare = sub.add_parser("prepare-peaks")
     prepare.add_argument("source", type=Path)
     prepare.add_argument("destination", type=Path)
+    bundle = sub.add_parser("prepare-bundle")
+    bundle.add_argument("source", type=Path)
+    bundle.add_argument("destination", type=Path)
+    bundle.add_argument("--margin", type=float, default=1.5)
+    bundle.add_argument("--smoothing", type=float, default=1.0)
+    probability = sub.add_parser('probability-bundle')
+    for name in ('source', 'original', 'destination'):
+        probability.add_argument(name, type=Path)
+    probability.add_argument('--threshold', type=float, default=0.05)
+    probability.add_argument('--margin', type=float, default=3.0)
+    atlas = sub.add_parser("atlas-to-subject")
+    for name in ("t1", "reference", "fsl-dir", "out"):
+        atlas.add_argument(f"--{name}", type=Path, required=True)
+    atlas.add_argument("--mni-prefix")
+    atlas.add_argument("--dwi-affine", type=Path)
+    atlas.add_argument("--threads", type=int, default=4)
+    atlas.add_argument('--atlas-dir', type=Path, default=Path('atlases/hcp1065'))
+    atlas.add_argument('--icbm-prefix')
     endings = sub.add_parser("endings")
-    for name in ("mask", "begin", "end"):
-        endings.add_argument(name, type=Path)
+    endings.add_argument("atlas", type=Path)
+    endings.add_argument("bundle", type=Path)
+    endings.add_argument("side", choices=("left", "right"))
+    endings.add_argument("out", type=Path)
+    endings.add_argument("--radius", type=float, default=3.0)
     tracks = sub.add_parser("tracks")
     tracks.add_argument("path", type=Path)
     tracks.add_argument("requested", type=int)
@@ -327,8 +599,15 @@ def main() -> None:
         img = load_nifti(args.source)
         data = clean_peaks(np.asanyarray(img.dataobj))
         nib.save(nib.Nifti1Image(data.astype(np.float32), img.affine), args.destination)
+    elif args.command == "prepare-bundle":
+        prepare_bundle(args.source, args.destination, args.margin, args.smoothing)
+    elif args.command == 'probability-bundle':
+        probability_bundle(args.source, args.original, args.destination, args.threshold, args.margin)
+    elif args.command == "atlas-to-subject":
+        atlas_to_subject(args.t1, args.reference, args.fsl_dir, args.out,
+                         args.mni_prefix, args.dwi_affine, args.threads, args.atlas_dir, args.icbm_prefix)
     elif args.command == "endings":
-        derive_endings(args.mask, args.begin, args.end)
+        anatomical_endings(args.atlas, args.bundle, args.side, args.out, args.radius)
     elif args.command == "tracks":
         end_paths = (args.endings[0], args.endings[1]) if args.endings else None
         check_tracks(args.path, args.requested, args.mask, end_paths)
