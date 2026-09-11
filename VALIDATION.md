@@ -34,6 +34,38 @@ and the same final containment filter.
 FACT, density maps, and optional FA summaries are additional features of the
 extended workflow, rather than outputs of the simple script.
 
+## Local example: left FAT discontinuity
+
+The README preview displays the **right FAT only**. The left reconstruction in
+this tumour example appears interrupted. Both binary bundle masks are single
+connected components even under face-only (6-neighbour) connectivity, so the
+appearance cannot be explained by a disconnected segmentation alone.
+
+An exploratory tracking comparison used two regions within the left bundle
+mask: its lateral portion at world RAS x < -38 mm and its medial portion at
+x > -24 mm. These are diagnostic coordinate-based regions, not validated
+IFG/SMA endpoint ROIs. Neither of the original 2000-streamline left iFOD2 and
+SD_STREAM outputs contained a streamline visiting both regions.
+
+Two additional iFOD2 runs generated 4000 candidates each with the workflow's
+seed mask, length limits, cutoff, and other tracking settings. Only the tracking
+boundary mask was omitted in the second run; no final containment filter was
+applied before this comparison.
+
+| Tracking boundary | Candidates | Visiting both regions | Connecting segment entirely inside the bundle mask |
+| --- | ---: | ---: | ---: |
+| Left FAT mask | 4000 | 0 | 0 |
+| No boundary mask | 4000 | 88 | 0 |
+
+These stochastic runs support a contribution from the tracking boundary to the
+missing connection. The whole-track filter does not split streamlines, and the
+masked candidates already lacked connections before filtering. Unrestricted
+connections are not evidence of anatomically correct FAT fibres. This comparison
+does not establish whether tumour, oedema, FOD estimation, or segmentation
+accounts for the mismatch between candidate paths and the bundle mask. It also
+does not demonstrate anatomical tract destruction. Counts and containment alone
+do not establish a complete FAT reconstruction.
+
 ## Automated checks
 
 - 21 regression tests passed.

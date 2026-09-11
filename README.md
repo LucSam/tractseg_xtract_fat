@@ -7,9 +7,9 @@ using TractSeg's XTRACT-trained segmentation model and MRtrix3 tractography.
 It retains **2000 streamlines per hemisphere and algorithm**, with every stored
 point and connecting line segment inside the corresponding bundle mask.
 
-![Anterior 3D view of both frontal aslant tracts with direction-based RGB colouring](assets/fat_3d.png)
+![Anterior 3D view of the right frontal aslant tract with direction-based RGB colouring](assets/fat_3d.png)
 
-*Anterior view of the local example, with 2000 iFOD2 streamlines per hemisphere.
+*Anterior view of the right FAT in the local example, with 2000 iFOD2 streamlines.
 Streamline colours encode local direction: red = left–right, green =
 anterior–posterior, blue = inferior–superior. The translucent brain surface
 provides anatomical context from the corresponding T1 image.*
