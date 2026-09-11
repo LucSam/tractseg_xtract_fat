@@ -7,6 +7,13 @@ using TractSeg's XTRACT-trained segmentation model and MRtrix3 tractography.
 It retains **2000 streamlines per hemisphere and algorithm**, with every stored
 point and connecting line segment inside the corresponding bundle mask.
 
+![Anterior 3D view of both frontal aslant tracts with direction-based RGB colouring](assets/fat_3d.png)
+
+*Anterior view of the local example, with 2000 iFOD2 streamlines per hemisphere.
+Streamline colours encode local direction: red = left–right, green =
+anterior–posterior, blue = inferior–superior. The translucent brain surface
+provides anatomical context from the corresponding T1 image.*
+
 `fat_simple.sh` is a **single shareable file**: the tracking commands appear first,
 and the Python validation/filtering code is embedded below them.
 
@@ -54,8 +61,8 @@ mrconvert /data/subject01/5_dwi/wm.mif /data/subject01/5_dwi/wm.nii.gz
 sh2peaks /data/subject01/5_dwi/wm.nii.gz /data/subject01/5_dwi/peaks.nii.gz -num 3
 ```
 
-The repository does not distribute MRI data or model weights. Supply your own
-preprocessed diffusion-derived FODs and peaks.
+The repository does not distribute source MRI volumes or model weights. Supply
+your own preprocessed diffusion-derived FODs and peaks.
 
 ## Outputs
 
@@ -155,10 +162,8 @@ Standard-space ROIs must first be transformed and checked anatomically.
 
 ## Interpretation and limitations
 
-In this model, `fa_l`/`fa_r` denote the frontal aslant tract, not scalar fractional
-anisotropy; `af_l`/`af_r` denote the arcuate fasciculus. TractSeg's XTRACT model
-supports tract segmentation and density prediction but has no learned FAT endpoint
-masks or Tract Orientation Maps (TOMs).
+TractSeg's XTRACT model supports tract segmentation and density prediction but
+has no learned FAT endpoint masks or Tract Orientation Maps (TOMs).
 [TractSeg documentation](https://github.com/MIC-DKFZ/TractSeg#use-different-tract-definitions)
 
 Standard TractSeg tracking uses 2000 streamlines, an undilated bundle mask, and
@@ -184,6 +189,7 @@ fat_simple.sh                # standalone script with embedded Python helper
 tractseg_xtract_fat.sh        # extended workflow
 scripts/fat_qc.py            # helper for the extended workflow
 tests/                      # regression tests and code verification
+assets/fat_3d.png            # 3D preview rendered from the local example
 README.md
 VALIDATION.md
 ```
