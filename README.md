@@ -5,7 +5,9 @@
 A shell workflow for reconstructing the left and right Frontal Aslant Tract (FAT)
 using TractSeg's XTRACT-trained segmentation model and MRtrix3 tractography.
 It retains **2000 streamlines per hemisphere and algorithm**, with every stored
-point and connecting line segment inside the corresponding bundle mask.
+point and connecting line segment inside the corresponding bundle mask. Each
+streamline must start in one end region and finish in the other; partial tracks
+are rejected. A run fails if it cannot find enough valid connections.
 
 ![Anterior 3D view of the right frontal aslant tract with direction-based RGB colouring](assets/fat_3d.png)
 
@@ -20,6 +22,27 @@ and the Python validation/filtering code is embedded below them.
 This workflow uses software and models developed by the TractSeg, XTRACT, and
 MRtrix3 teams. Authorship here refers to this workflow and its integration;
 please also cite the original methods listed below.
+
+## Individual masks and pretrained weights
+
+**No training is performed by this workflow.** TractSeg's authors already trained
+and published the model. The same weights are reused to predict a new FAT mask
+from **each individual's own diffusion peaks**.
+
+| File | Meaning |
+| --- | --- |
+| `weights/pretrained_weights_tract_segmentation_xtract_v1.npz` | Shared pretrained model; not a patient mask |
+| `<IN>/peaks.nii.gz` | This individual's input peaks |
+| `<OUT>/bundle_segmentations/FAT_left.nii.gz` and `FAT_right.nii.gz` | This individual's predicted FAT masks |
+| `<OUT>/endings_segmentations/FAT_left_b.nii.gz`, `FAT_left_e.nii.gz`, etc. | Geometric end regions derived from those masks |
+
+You do not need other subjects or a training dataset. The local example masks
+are still in `results/simple/bundle_segmentations/`; these image files are
+excluded from Git. `weights/` contains only the reusable model download.
+
+This uses **TractSeg with the XTRACT tract definition**, not the FSL `xtract`
+command and not a fixed atlas mask copied unchanged to every individual.
+[TractSeg documentation](https://github.com/MIC-DKFZ/TractSeg#use-different-tract-definitions)
 
 ## Requirements
 
@@ -70,6 +93,10 @@ your own preprocessed diffusion-derived FODs and peaks.
 fat_output/
   bundle_segmentations/FAT_left.nii.gz
   bundle_segmentations/FAT_right.nii.gz
+  endings_segmentations/FAT_left_b.nii.gz
+  endings_segmentations/FAT_left_e.nii.gz
+  endings_segmentations/FAT_right_b.nii.gz
+  endings_segmentations/FAT_right_e.nii.gz
   iFOD2_trackings/FAT_left.tck
   iFOD2_trackings/FAT_right.tck
   SD_STREAM_trackings/FAT_left.tck
@@ -85,25 +112,39 @@ after all processing and validation steps complete. `work/` contains intermediat
 peaks, model outputs, and candidate streamlines. Existing output directories are
 not overwritten.
 
-## How tracking stays inside the mask
+## Complete connections inside the mask
 
-1. Segment both FATs using `TractSeg --tract_definition xtract`. The model names
-   are `fa_l` and `fa_r`, exported here as `FAT_left` and `FAT_right`.
-2. Generate 4000 candidates per hemisphere and algorithm using exactly one
-   undilated bundle mask, with `-downsample 1`.
-3. Reject whole streamlines if any vertex or connecting line segment leaves
-   the mask. No clipping, splitting, mask dilation, or duplication is performed.
-4. Save 2000 accepted streamlines and validate the saved TCK file again.
+1. Predict the individual's FATs using `TractSeg --tract_definition xtract`.
+   The model names are `fa_l` and `fa_r`, exported as `FAT_left` and `FAT_right`.
+2. Derive two end regions from each mask's long axis in physical coordinates.
+   The outer 15% at either end forms `_b` and `_e`; both remain inside the mask.
+   Disconnected masks and shapes without a clear long axis cause an error.
+3. Seed within `_b`, require both regions, and stop upon reaching `_e`, using
+   MRtrix `-seed_unidirectional -include ... -include ... -stop`. Generate up to 4000
+   candidates with exactly one unchanged bundle mask and `-downsample 1`.
+4. Keep a whole streamline only if its **first and last points lie in opposite
+   end regions** and every vertex and connecting segment stays inside the mask.
+   Visiting both regions somewhere along the trajectory is insufficient.
+5. Save 2000 accepted streamlines and validate the saved TCK file again. A
+   shortfall stops processing without writing a partial final bundle or `SUCCESS`.
 
-The filter transforms world coordinates through the inverse NIfTI affine and
-checks every voxel traversed by each straight segment, including short corner
-crossings between valid vertices. Multiple MRtrix `-mask` arguments would form a
-union, so the workflow passes only the bundle mask.
+The end regions are **geometric approximations**, not learned TractSeg endings
+or independently identified IFG/SMA cortex. Inspect their location for every
+individual. An endpoint check establishes a connection between the chosen ROIs;
+it does not independently establish anatomical correctness.
 
-If fewer than 2000 valid streamlines remain, processing stops instead of relaxing
-the mask or silently returning fewer tracks. Complete missing NaN peak vectors
-are converted to zero vectors in a working copy; partially NaN vectors and Inf
-values are rejected. Input files are not modified.
+The containment check uses the inverse NIfTI affine and every voxel traversed by
+each straight segment, including short corner crossings. The final filter never
+clips, splits, joins, duplicates, or moves streamlines. MRtrix itself terminates
+tracking at the mask boundary; multiple `-mask` arguments would form a union.
+
+There is **no automatic mask expansion or fallback to partial tracks**. In the
+local example, the left mask can prevent complete connections despite being
+connected. End regions make this failure explicit rather than disguising it with
+2000 shorter tracks. See [VALIDATION.md](VALIDATION.md).
+
+Complete missing NaN peak vectors become zero vectors in a working copy;
+partially NaN vectors and Inf values are rejected. Input files are not modified.
 
 ## Simple and extended workflows
 
@@ -117,13 +158,14 @@ Both scripts use the same default settings for their shared iFOD2/SD_STREAM step
 | Length limits | 20–150 mm |
 | FOD/peak cutoff | 0.1 |
 | Downsampling factor / threads | 1 / 4 |
-| Final filter | Entire polyline must remain inside the mask |
+| End regions | Terminal 15% at either end of the individual mask’s physical long axis |
+| Final filter | Entire polyline inside mask; endpoints in opposite end regions |
 
-The two tested runs produced identical left/right segmentations and image geometry.
+The earlier runs produced identical left/right segmentations and image geometry.
 Individual streamlines differ between runs because seeds are placed randomly;
 iFOD2 also samples directions probabilistically. SD_STREAM has deterministic
-propagation but uses random seed locations here. Both workflows enforce the same
-count and containment requirements.
+propagation but uses random seed locations here. Both current workflows enforce the same
+count, containment, and endpoint requirements.
 
 `tractseg_xtract_fat.sh` additionally supports batch processing, FACT, track-density
 maps, optional mean FA per streamline, external ROIs, and configurable parameters.
@@ -157,13 +199,15 @@ density maps and requires a second model-weight download.
 
 `ROI_DIR` may contain native-space `fa_l/{seed,target,exclude}.nii.gz` and
 `fa_r/{seed,target,exclude}.nii.gz`. All six files must match the DWI grid. Seed
-and target must be traversed, while the bundle mask remains the tracking boundary.
+and target replace the geometric end regions: a streamline must start in one and
+finish in the other, while the bundle mask remains the tracking boundary.
 Standard-space ROIs must first be transformed and checked anatomically.
 
 ## Interpretation and limitations
 
 TractSeg's XTRACT model supports tract segmentation and density prediction but
-has no learned FAT endpoint masks or Tract Orientation Maps (TOMs).
+has no learned FAT endpoint masks or Tract Orientation Maps (TOMs). The geometric
+ROIs added here require no extra model or training.
 [TractSeg documentation](https://github.com/MIC-DKFZ/TractSeg#use-different-tract-definitions)
 
 Standard TractSeg tracking uses 2000 streamlines, an undilated bundle mask, and

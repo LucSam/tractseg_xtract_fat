@@ -15,7 +15,7 @@ run_fat_pipeline() {
   export MPLCONFIGDIR="$OUT/work/matplotlib"
   export XDG_CACHE_HOME="$OUT/work/cache"
 
-  mkdir -p "$OUT/work" "$OUT/bundle_segmentations" "$OUT/iFOD2_trackings" "$OUT/SD_STREAM_trackings" "$TRACTSEG_WEIGHTS_DIR" "$MPLCONFIGDIR" "$XDG_CACHE_HOME"
+  mkdir -p "$OUT/work" "$OUT/bundle_segmentations" "$OUT/endings_segmentations" "$OUT/iFOD2_trackings" "$OUT/SD_STREAM_trackings" "$TRACTSEG_WEIGHTS_DIR" "$MPLCONFIGDIR" "$XDG_CACHE_HOME"
 
   # Check peaks/FODs and replace absent NaN peak triplets in a working copy.
   fat_qc inputs --peaks "$IN/peaks.nii.gz" --fod "$IN/wm.nii.gz"
@@ -26,23 +26,27 @@ run_fat_pipeline() {
   fat_qc export "$OUT/work/xtract_model/bundle_segmentations/fa_l.nii.gz" "$OUT/work/peaks.nii.gz" "$OUT/bundle_segmentations/FAT_left.nii.gz"
   fat_qc export "$OUT/work/xtract_model/bundle_segmentations/fa_r.nii.gz" "$OUT/work/peaks.nii.gz" "$OUT/bundle_segmentations/FAT_right.nii.gz"
 
+  # Subject-specific geometric end regions; no extra model or training.
+  fat_qc endings "$OUT/bundle_segmentations/FAT_left.nii.gz" "$OUT/endings_segmentations/FAT_left_b.nii.gz" "$OUT/endings_segmentations/FAT_left_e.nii.gz"
+  fat_qc endings "$OUT/bundle_segmentations/FAT_right.nii.gz" "$OUT/endings_segmentations/FAT_right_b.nii.gz" "$OUT/endings_segmentations/FAT_right_e.nii.gz"
+
   # ONE -mask: bundle only. Multiple MRtrix masks would form a union!
   # Generate 4000 candidates, then keep 2000 WHOLE tracks entirely inside the mask.
-  tckgen "$IN/wm.nii.gz" "$OUT/work/FAT_left_iFOD2.tck" -algorithm iFOD2 -seed_image "$OUT/bundle_segmentations/FAT_left.nii.gz" -mask "$OUT/bundle_segmentations/FAT_left.nii.gz" -select 4000 -seeds 2000000 -minlength 20 -maxlength 150 -cutoff 0.1 -downsample 1 -nthreads 4
-  tckgen "$IN/wm.nii.gz" "$OUT/work/FAT_right_iFOD2.tck" -algorithm iFOD2 -seed_image "$OUT/bundle_segmentations/FAT_right.nii.gz" -mask "$OUT/bundle_segmentations/FAT_right.nii.gz" -select 4000 -seeds 2000000 -minlength 20 -maxlength 150 -cutoff 0.1 -downsample 1 -nthreads 4
-  fat_qc filter-tracks "$OUT/work/FAT_left_iFOD2.tck" "$OUT/bundle_segmentations/FAT_left.nii.gz" "$OUT/iFOD2_trackings/FAT_left.tck" 2000
-  fat_qc filter-tracks "$OUT/work/FAT_right_iFOD2.tck" "$OUT/bundle_segmentations/FAT_right.nii.gz" "$OUT/iFOD2_trackings/FAT_right.tck" 2000
+  tckgen "$IN/wm.nii.gz" "$OUT/work/FAT_left_iFOD2.tck" -algorithm iFOD2 -seed_image "$OUT/endings_segmentations/FAT_left_b.nii.gz" -include "$OUT/endings_segmentations/FAT_left_b.nii.gz" -include "$OUT/endings_segmentations/FAT_left_e.nii.gz" -seed_unidirectional -stop -mask "$OUT/bundle_segmentations/FAT_left.nii.gz" -select 4000 -seeds 2000000 -minlength 20 -maxlength 150 -cutoff 0.1 -downsample 1 -nthreads 4
+  fat_qc filter-tracks "$OUT/work/FAT_left_iFOD2.tck" "$OUT/bundle_segmentations/FAT_left.nii.gz" "$OUT/iFOD2_trackings/FAT_left.tck" 2000 --endings "$OUT/endings_segmentations/FAT_left_b.nii.gz" "$OUT/endings_segmentations/FAT_left_e.nii.gz"
+  tckgen "$IN/wm.nii.gz" "$OUT/work/FAT_right_iFOD2.tck" -algorithm iFOD2 -seed_image "$OUT/endings_segmentations/FAT_right_b.nii.gz" -include "$OUT/endings_segmentations/FAT_right_b.nii.gz" -include "$OUT/endings_segmentations/FAT_right_e.nii.gz" -seed_unidirectional -stop -mask "$OUT/bundle_segmentations/FAT_right.nii.gz" -select 4000 -seeds 2000000 -minlength 20 -maxlength 150 -cutoff 0.1 -downsample 1 -nthreads 4
+  fat_qc filter-tracks "$OUT/work/FAT_right_iFOD2.tck" "$OUT/bundle_segmentations/FAT_right.nii.gz" "$OUT/iFOD2_trackings/FAT_right.tck" 2000 --endings "$OUT/endings_segmentations/FAT_right_b.nii.gz" "$OUT/endings_segmentations/FAT_right_e.nii.gz"
 
-  tckgen "$IN/wm.nii.gz" "$OUT/work/FAT_left_SD_STREAM.tck" -algorithm SD_STREAM -seed_image "$OUT/bundle_segmentations/FAT_left.nii.gz" -mask "$OUT/bundle_segmentations/FAT_left.nii.gz" -select 4000 -seeds 2000000 -minlength 20 -maxlength 150 -cutoff 0.1 -downsample 1 -nthreads 4
-  tckgen "$IN/wm.nii.gz" "$OUT/work/FAT_right_SD_STREAM.tck" -algorithm SD_STREAM -seed_image "$OUT/bundle_segmentations/FAT_right.nii.gz" -mask "$OUT/bundle_segmentations/FAT_right.nii.gz" -select 4000 -seeds 2000000 -minlength 20 -maxlength 150 -cutoff 0.1 -downsample 1 -nthreads 4
-  fat_qc filter-tracks "$OUT/work/FAT_left_SD_STREAM.tck" "$OUT/bundle_segmentations/FAT_left.nii.gz" "$OUT/SD_STREAM_trackings/FAT_left.tck" 2000
-  fat_qc filter-tracks "$OUT/work/FAT_right_SD_STREAM.tck" "$OUT/bundle_segmentations/FAT_right.nii.gz" "$OUT/SD_STREAM_trackings/FAT_right.tck" 2000
+  tckgen "$IN/wm.nii.gz" "$OUT/work/FAT_left_SD_STREAM.tck" -algorithm SD_STREAM -seed_image "$OUT/endings_segmentations/FAT_left_b.nii.gz" -include "$OUT/endings_segmentations/FAT_left_b.nii.gz" -include "$OUT/endings_segmentations/FAT_left_e.nii.gz" -seed_unidirectional -stop -mask "$OUT/bundle_segmentations/FAT_left.nii.gz" -select 4000 -seeds 2000000 -minlength 20 -maxlength 150 -cutoff 0.1 -downsample 1 -nthreads 4
+  fat_qc filter-tracks "$OUT/work/FAT_left_SD_STREAM.tck" "$OUT/bundle_segmentations/FAT_left.nii.gz" "$OUT/SD_STREAM_trackings/FAT_left.tck" 2000 --endings "$OUT/endings_segmentations/FAT_left_b.nii.gz" "$OUT/endings_segmentations/FAT_left_e.nii.gz"
+  tckgen "$IN/wm.nii.gz" "$OUT/work/FAT_right_SD_STREAM.tck" -algorithm SD_STREAM -seed_image "$OUT/endings_segmentations/FAT_right_b.nii.gz" -include "$OUT/endings_segmentations/FAT_right_b.nii.gz" -include "$OUT/endings_segmentations/FAT_right_e.nii.gz" -seed_unidirectional -stop -mask "$OUT/bundle_segmentations/FAT_right.nii.gz" -select 4000 -seeds 2000000 -minlength 20 -maxlength 150 -cutoff 0.1 -downsample 1 -nthreads 4
+  fat_qc filter-tracks "$OUT/work/FAT_right_SD_STREAM.tck" "$OUT/bundle_segmentations/FAT_right.nii.gz" "$OUT/SD_STREAM_trackings/FAT_right.tck" 2000 --endings "$OUT/endings_segmentations/FAT_right_b.nii.gz" "$OUT/endings_segmentations/FAT_right_e.nii.gz"
 
-  # Validate final files after saving; no clipping or mask dilation.
-  fat_qc tracks "$OUT/iFOD2_trackings/FAT_left.tck" 2000 --mask "$OUT/bundle_segmentations/FAT_left.nii.gz"
-  fat_qc tracks "$OUT/iFOD2_trackings/FAT_right.tck" 2000 --mask "$OUT/bundle_segmentations/FAT_right.nii.gz"
-  fat_qc tracks "$OUT/SD_STREAM_trackings/FAT_left.tck" 2000 --mask "$OUT/bundle_segmentations/FAT_left.nii.gz"
-  fat_qc tracks "$OUT/SD_STREAM_trackings/FAT_right.tck" 2000 --mask "$OUT/bundle_segmentations/FAT_right.nii.gz"
+  # Validate saved polylines and both endpoints; no clipping or mask dilation.
+  fat_qc tracks "$OUT/iFOD2_trackings/FAT_left.tck" 2000 --mask "$OUT/bundle_segmentations/FAT_left.nii.gz" --endings "$OUT/endings_segmentations/FAT_left_b.nii.gz" "$OUT/endings_segmentations/FAT_left_e.nii.gz"
+  fat_qc tracks "$OUT/iFOD2_trackings/FAT_right.tck" 2000 --mask "$OUT/bundle_segmentations/FAT_right.nii.gz" --endings "$OUT/endings_segmentations/FAT_right_b.nii.gz" "$OUT/endings_segmentations/FAT_right_e.nii.gz"
+  fat_qc tracks "$OUT/SD_STREAM_trackings/FAT_left.tck" 2000 --mask "$OUT/bundle_segmentations/FAT_left.nii.gz" --endings "$OUT/endings_segmentations/FAT_left_b.nii.gz" "$OUT/endings_segmentations/FAT_left_e.nii.gz"
+  fat_qc tracks "$OUT/SD_STREAM_trackings/FAT_right.tck" 2000 --mask "$OUT/bundle_segmentations/FAT_right.nii.gz" --endings "$OUT/endings_segmentations/FAT_right_b.nii.gz" "$OUT/endings_segmentations/FAT_right_e.nii.gz"
   fat_qc summary "$OUT"
   touch "$OUT/SUCCESS"
 }
@@ -184,17 +188,92 @@ def mask_data(path: Path) -> tuple[np.ndarray, np.ndarray]:
     return data.astype(bool), np.linalg.inv(img.affine)
 
 
-def filter_tracks(source: Path, mask_path: Path, destination: Path, requested: int) -> None:
+def derive_endings(mask_path: Path, begin_path: Path, end_path: Path) -> None:
+    """Geometric terminal caps; not learned or anatomically labelled endpoints."""
+    mask, _ = mask_data(mask_path)
+    if begin_path.exists() or end_path.exists():
+        raise ValueError("End-region output already exists.")
+    voxels = np.argwhere(mask)
+    unseen = {tuple(point) for point in voxels}
+    stack = [unseen.pop()]
+    while stack:
+        point = stack.pop()
+        for axis in range(3):
+            for step in (-1, 1):
+                neighbour = list(point)
+                neighbour[axis] += step
+                key = tuple(neighbour)
+                if key in unseen:
+                    unseen.remove(key)
+                    stack.append(key)
+    if unseen:
+        raise ValueError("Bundle mask is not face-connected; inspect it before deriving end regions.")
+    image = load_nifti(mask_path)
+    world = nib.affines.apply_affine(image.affine, voxels)
+    _, singular, axes = np.linalg.svd(world - world.mean(axis=0), full_matrices=False)
+    if len(singular) < 2 or singular[0] <= 1.5 * singular[1]:
+        raise ValueError("Mask has no clear long axis for deriving end regions.")
+    direction = axes[0]
+    if direction[2] < 0:
+        direction = -direction
+    projection = (world - world.mean(axis=0)) @ direction
+    span = float(np.ptp(projection))
+    if span < 10:
+        raise ValueError("Mask is too short to derive separated FAT end regions.")
+    selections = (projection <= projection.min() + 0.15 * span,
+                  projection >= projection.max() - 0.15 * span)
+    for path, selected in zip((begin_path, end_path), selections):
+        region = np.zeros(mask.shape, dtype=np.uint8)
+        region[tuple(voxels[selected].T)] = 1
+        nib.save(nib.Nifti1Image(region, image.affine), path)
+        print(f"{path.name}: {int(selected.sum())} voxels; geometric terminal 15% of mask long axis.")
+
+
+def load_endings(mask_path: Path | None, paths: tuple[Path, Path] | None) -> tuple[np.ndarray, np.ndarray] | None:
+    if paths is None:
+        return None
+    if mask_path is None:
+        raise ValueError("A bundle mask is required when checking end regions.")
+    bundle, _ = mask_data(mask_path)
+    regions = []
+    for path in paths:
+        same_grid(mask_path, path)
+        region, _ = mask_data(path)
+        region &= bundle
+        if not region.any():
+            raise ValueError(f"End region does not intersect the bundle mask: {path}")
+        regions.append(region)
+    if (regions[0] & regions[1]).any():
+        raise ValueError("The two end regions overlap inside the bundle mask.")
+    return regions[0], regions[1]
+
+
+def connects_endings(voxel_points: np.ndarray, regions: tuple[np.ndarray, np.ndarray]) -> bool:
+    if len(voxel_points) < 2 or not np.isfinite(voxel_points[[0, -1]]).all():
+        return False
+    cells = np.floor(voxel_points[[0, -1]] + 0.5).astype(int)
+    begin, end = regions
+    if np.any(cells < 0) or np.any(cells >= np.asarray(begin.shape)):
+        return False
+    a, b = tuple(cells[0]), tuple(cells[1])
+    return bool((begin[a] and end[b]) or (end[a] and begin[b]))
+
+
+def filter_tracks(source: Path, mask_path: Path, destination: Path, requested: int,
+                  endings: tuple[Path, Path] | None = None) -> None:
     """Keep whole tracks only: no clipping, splitting, dilation or duplication."""
     if requested <= 0:
         raise ValueError("Requested streamline count must be positive.")
     if destination.exists():
         raise ValueError(f"Output already exists: {destination}")
     mask, inverse = mask_data(mask_path)
+    regions = load_endings(mask_path, endings)
     selected = []
     rejected = 0
     for streamline in nib.streamlines.load(str(source), lazy_load=True).streamlines:
-        if inside_mask(nib.affines.apply_affine(inverse, streamline), mask):
+        voxel_points = nib.affines.apply_affine(inverse, streamline)
+        connected = regions is None or connects_endings(voxel_points, regions)
+        if connected and inside_mask(voxel_points, mask):
             selected.append(streamline)
             if len(selected) == requested:
                 break
@@ -202,31 +281,39 @@ def filter_tracks(source: Path, mask_path: Path, destination: Path, requested: i
             rejected += 1
     if len(selected) != requested:
         raise ValueError(
-            f"Only {len(selected)}/{requested} complete streamlines inside {mask_path.name}. "
-            "Generate more candidates; no incomplete final tractogram written."
+            f"Only {len(selected)}/{requested} valid streamlines inside {mask_path.name}. "
+            "Check end regions, FODs and mask; no incomplete final tractogram written."
         )
     nib.streamlines.save(
         nib.streamlines.Tractogram(selected, affine_to_rasmm=np.eye(4)), str(destination)
     )
-    print(f"{destination.name}: retained {requested}; rejected {rejected} tracks leaving the mask.")
+    print(f"{destination.name}: retained {requested}; rejected {rejected} tracks failing mask/end-region checks.")
 
 
-def check_tracks(path: Path, requested: int, mask_path: Path | None = None) -> None:
+def check_tracks(path: Path, requested: int, mask_path: Path | None = None,
+                 endings: tuple[Path, Path] | None = None) -> None:
     tractogram = nib.streamlines.load(str(path), lazy_load=True)
     count = 0
     outside = 0
+    disconnected = 0
+    regions = load_endings(mask_path, endings)
     if mask_path is not None:
         mask, inverse = mask_data(mask_path)
     for streamline in tractogram.streamlines:
         count += 1
         if mask_path is not None and not inside_mask(nib.affines.apply_affine(inverse, streamline), mask):
             outside += 1
+        if regions is not None and not connects_endings(nib.affines.apply_affine(inverse, streamline), regions):
+            disconnected += 1
     if count != requested:
         raise ValueError(f"{path}: {count}/{requested} streamlines. Inspect mask/ROIs and seed limit; no silent success.")
     if outside:
         raise ValueError(f"{path}: {outside}/{count} streamlines leave the bundle mask.")
+    if disconnected:
+        raise ValueError(f"{path}: {disconnected}/{count} streamlines do not start and end in opposite end regions.")
     containment = "; 0 outside (vertices and connecting segments)" if mask_path is not None else ""
-    print(f"{path.name}: {count} streamlines OK{containment}")
+    connection = "; all connect opposite end regions" if regions is not None else ""
+    print(f"{path.name}: {count} streamlines OK{containment}{connection}")
 
 
 def summary(out: Path) -> None:
@@ -242,7 +329,10 @@ def summary(out: Path) -> None:
         "Segmentation: TractSeg --tract_definition xtract; fa_l=FAT_left, fa_r=FAT_right.\n"
         "Optional streamlines: MRtrix with ONE undilated bundle mask; see pipeline.log for ROI constraints.\n"
         "Whole streamlines leaving the mask are rejected; all vertices AND connecting segments are checked.\n"
-        "No learned FAT endings or TOMs. No full endpoint-to-endpoint reconstruction is guaranteed.\n"
+        "Tracking requires both endpoints in opposite end regions, in addition to whole-polyline containment.\n"
+        "Default end regions: terminal 15% of the subject mask's physical principal axis; no training.\n"
+        "These geometric end regions are not learned anatomical IFG/SMA segmentations; inspect them individually.\n"
+        "No learned FAT endings or TOMs. Insufficient valid connections cause failure, not a partial final bundle.\n"
         "Mean FA CSVs: one mean per streamline, NOT spatially corresponding along-tract profiles.\n"
         "Densities from dm_regression are model predictions, not measured streamline counts.\n"
     )
@@ -265,14 +355,19 @@ def main() -> None:
     prepare = sub.add_parser("prepare-peaks")
     prepare.add_argument("source", type=Path)
     prepare.add_argument("destination", type=Path)
+    endings = sub.add_parser("endings")
+    for name in ("mask", "begin", "end"):
+        endings.add_argument(name, type=Path)
     tracks = sub.add_parser("tracks")
     tracks.add_argument("path", type=Path)
     tracks.add_argument("requested", type=int)
     tracks.add_argument("--mask", type=Path)
+    tracks.add_argument("--endings", nargs=2, type=Path, metavar=("BEGIN", "END"))
     filtering = sub.add_parser("filter-tracks")
     for name in ("source", "mask", "destination"):
         filtering.add_argument(name, type=Path)
     filtering.add_argument("requested", type=int)
+    filtering.add_argument("--endings", nargs=2, type=Path, metavar=("BEGIN", "END"))
     sub.add_parser("summary").add_argument("out", type=Path)
     args = parser.parse_args()
     if args.command == "parameters":
@@ -288,10 +383,14 @@ def main() -> None:
         img = load_nifti(args.source)
         data = clean_peaks(np.asanyarray(img.dataobj))
         nib.save(nib.Nifti1Image(data.astype(np.float32), img.affine), args.destination)
+    elif args.command == "endings":
+        derive_endings(args.mask, args.begin, args.end)
     elif args.command == "tracks":
-        check_tracks(args.path, args.requested, args.mask)
+        end_paths = (args.endings[0], args.endings[1]) if args.endings else None
+        check_tracks(args.path, args.requested, args.mask, end_paths)
     elif args.command == "filter-tracks":
-        filter_tracks(args.source, args.mask, args.destination, args.requested)
+        end_paths = (args.endings[0], args.endings[1]) if args.endings else None
+        filter_tracks(args.source, args.mask, args.destination, args.requested, end_paths)
     else:
         summary(args.out)
 

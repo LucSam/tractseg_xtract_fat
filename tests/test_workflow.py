@@ -102,6 +102,59 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "1/2 streamlines"):
             qc.check_tracks(path, 2)
 
+    def test_endings_follow_world_geometry_and_stay_in_mask(self) -> None:
+        mask = np.zeros((5, 5, 30), dtype=np.uint8)
+        mask[1:4, 1:4, 1:29] = 1
+        path = self.folder / "elongated.nii.gz"
+        affine = np.array([[1.5, 0, 0, -40], [0, -1.5, 0, 20], [0, 0, -2, 80], [0, 0, 0, 1]])
+        nib.save(nib.Nifti1Image(mask, affine), path)
+        begin, end = self.folder / "begin.nii.gz", self.folder / "end.nii.gz"
+        qc.derive_endings(path, begin, end)
+        a, b = np.asarray(qc.load_nifti(begin).dataobj) > 0, np.asarray(qc.load_nifti(end).dataobj) > 0
+        self.assertTrue(a.any() and b.any())
+        self.assertFalse((a & b).any())
+        self.assertTrue(np.all(mask[a | b]))
+        self.assertLess(nib.affines.apply_affine(affine, np.argwhere(a))[:, 2].mean(),
+                        nib.affines.apply_affine(affine, np.argwhere(b))[:, 2].mean())
+
+    def test_endings_reject_disconnected_mask(self) -> None:
+        mask = np.ones((3, 3, 30), dtype=np.uint8)
+        mask[:, :, 15] = 0
+        path = self.save("disconnected.nii.gz", mask)
+        with self.assertRaisesRegex(ValueError, "connected"):
+            qc.derive_endings(path, self.folder / "a.nii.gz", self.folder / "b.nii.gz")
+
+    def test_endpoint_filter_rejects_fragments_and_wrong_endpoints(self) -> None:
+        mask = np.ones((3, 3, 20), dtype=np.uint8)
+        path = self.save("bundle.nii.gz", mask)
+        a, b = np.zeros_like(mask), np.zeros_like(mask)
+        a[:, :, :3] = 1
+        b[:, :, 17:] = 1
+        begin, end = self.save("a.nii.gz", a), self.save("b.nii.gz", b)
+        good = np.array([[1, 1, 1], [1, 1, 10], [1, 1, 18]])
+        fragment = np.array([[1, 1, 1], [1, 1, 10]])
+        visits_but_ends_wrong = np.array([[1, 1, 5], [1, 1, 1], [1, 1, 18], [1, 1, 5]])
+        source, out = self.folder / "all.tck", self.folder / "connected.tck"
+        nib.streamlines.save(nib.streamlines.Tractogram(
+            [fragment, visits_but_ends_wrong, good, good[::-1]], affine_to_rasmm=np.eye(4)
+        ), str(source))
+        qc.filter_tracks(source, path, out, 2, (begin, end))
+        qc.check_tracks(out, 2, path, (begin, end))
+        with self.assertRaisesRegex(ValueError, "end regions"):
+            qc.check_tracks(source, 4, path, (begin, end))
+        with self.assertRaisesRegex(ValueError, "Only 2/3"):
+            qc.filter_tracks(source, path, self.folder / "short.tck", 3, (begin, end))
+        self.assertFalse((self.folder / "short.tck").exists())
+
+    def test_end_regions_cannot_overlap(self) -> None:
+        mask = self.save("bundle.nii.gz", np.ones((3, 3, 20)))
+        source = self.folder / "source.tck"
+        nib.streamlines.save(nib.streamlines.Tractogram(
+            [np.array([[1, 1, 1], [1, 1, 18]])], affine_to_rasmm=np.eye(4)
+        ), str(source))
+        with self.assertRaisesRegex(ValueError, "overlap"):
+            qc.check_tracks(source, 1, mask, (mask, mask))
+
     def test_inside_mask_rejects_outside_vertex(self) -> None:
         mask = np.ones((4, 5, 6), dtype=bool)
         self.assertFalse(qc.inside_mask(np.array([[0, 0, 0], [-0.6, 0, 0]]), mask))
@@ -164,6 +217,27 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(command.count("-mask"), 1, "Multiple MRtrix masks form a UNION.")
             self.assertIn("bundle_segmentations", command[command.index("-mask") + 1])
 
+    def test_pipeline_requires_opposite_end_regions(self) -> None:
+        result = self.cli("dry-run", str(self.folder))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        commands = [shlex.split(line[2:]) for line in result.stdout.splitlines() if line.startswith("+ ")]
+        generators = [cmd for cmd in commands if cmd[0] == "tckgen"]
+        for cmd in generators:
+            self.assertEqual(cmd.count("-include"), 2)
+            self.assertIn("-stop", cmd)
+        filters = [cmd for cmd in commands if "filter-tracks" in cmd]
+        self.assertEqual(len(filters), len(generators))
+        for cmd in filters:
+            self.assertIn("--endings", cmd)
+        simple = (ROOT / "fat_simple.sh").read_text().split("# Embedded Python helper.", 1)[0]
+        generators = [shlex.split(line.strip()) for line in simple.splitlines() if line.strip().startswith("tckgen ")]
+        self.assertEqual(len(generators), 4)
+        for cmd in generators:
+            self.assertEqual(cmd.count("-include"), 2)
+            self.assertEqual(cmd.count("-mask"), 1)
+            self.assertIn("-seed_unidirectional", cmd)
+            self.assertIn("-stop", cmd)
+
     def test_bad_tracking_parameters_rejected(self) -> None:
         result = self.cli("check", str(self.folder), MIN_LENGTH="200", MAX_LENGTH="100")
         self.assertNotEqual(result.returncode, 0)
@@ -208,6 +282,25 @@ class WorkflowTests(unittest.TestCase):
         script = (ROOT / "fat_simple.sh").read_text()
         embedded = script.split("<<'FAT_QC_PY'\n", 1)[1].split("\nFAT_QC_PY\n", 1)[0]
         self.assertEqual(embedded, (ROOT / "scripts/fat_qc.py").read_text().rstrip("\n"))
+
+    def test_standalone_cli_derives_and_checks_end_regions(self) -> None:
+        script = self.folder / "fat_simple.sh"
+        shutil.copyfile(ROOT / "fat_simple.sh", script)
+        mask = self.save("long_mask.nii.gz", np.ones((3, 3, 20)))
+        begin, end = self.folder / "begin.nii.gz", self.folder / "end.nii.gz"
+        command = ["bash", "-c", 'source "$1"; shift; fat_qc "$@"', "test", str(script)]
+        result = subprocess.run(command + ["endings", str(mask), str(begin), str(end)],
+                                cwd=self.folder, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        source, out = self.folder / "input.tck", self.folder / "output.tck"
+        nib.streamlines.save(nib.streamlines.Tractogram(
+            [np.array([[1, 1, 1], [1, 1, 18]])], affine_to_rasmm=np.eye(4)
+        ), str(source))
+        result = subprocess.run(command + ["filter-tracks", str(source), str(mask), str(out), "1",
+                                          "--endings", str(begin), str(end)],
+                                cwd=self.folder, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        qc.check_tracks(out, 1, mask, (begin, end))
 
 
 if __name__ == "__main__":

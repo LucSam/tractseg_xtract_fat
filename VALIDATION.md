@@ -2,10 +2,43 @@
 
 **Workflow author: Lucius Fekonja**
 
-## Tested final outputs
+## Current endpoint-constrained workflow
 
-Both workflows were run end to end with the local example dataset using
-TractSeg 2.9 and MRtrix 3.0.4-153-g4040c17b, with four threads.
+The current scripts require each streamline to start and end in opposite end
+regions, as well as remaining entirely inside the bundle mask. End regions are
+computed from the terminal 15% of the mask's principal axis in physical space.
+They are geometric ROIs, not independently labelled IFG/SMA cortex.
+
+The revised tracking and filtering commands were tested on the already computed
+individual masks and FODs; model inference was unchanged and was not repeated.
+The local outputs are under `results/connected_strict/`.
+
+| Right FAT algorithm | Candidates | Final streamlines | Mask violations | Wrong endpoint pairs |
+| --- | ---: | ---: | ---: | ---: |
+| iFOD2 | 4000 | 2000 | 0 | 0 |
+| SD_STREAM | 4000 | 2000 | 0 | 0 |
+
+The right end regions contain 222 beginning and 339 ending voxels; the left
+regions contain 85 and 371 voxels. The original masks are unchanged. The README
+preview now uses the revised right iFOD2 result.
+
+The left side produced **zero connecting candidates with a limit of two million
+seed attempts** using the same iFOD2 parameters and original mask. The filter
+reported `Only 0/2000 valid streamlines` and wrote neither a final left tractogram
+nor a global `SUCCESS` marker. An earlier 50,000-seed probe also found none. End regions prevent
+partial tracks being reported as complete, but cannot manufacture a missing
+FOD-supported route inside the mask. The public workflow does not automatically
+expand the mask, lower the cutoff, join fragments, or fall back to partial tracks.
+
+A separate exploratory mask-expansion test did not change the production masks
+or scripts. Any mask correction needs individual anatomical review. The tumour
+is on the right according to the dataset owner; the left failure is not evidence
+of a tumour-related tract interruption.
+
+## Earlier mask-only outputs
+
+Before endpoint constraints were added, both workflows were run end to end
+with the local example dataset using TractSeg 2.9 and MRtrix 3.0.4-153-g4040c17b, with four threads.
 
 | Local output directory | Algorithms | Streamlines per hemisphere/algorithm | Mask violations |
 | --- | --- | ---: | ---: |
@@ -23,13 +56,13 @@ outside the bundle masks. Both runs exited with code 0 and wrote `SUCCESS`.
 These MRI-derived outputs are stored locally and are excluded from Git. This
 report summarises the checks; the repository does not distribute the dataset.
 
-## Comparison of workflows
+## Comparison of the earlier workflows
 
 The two runs produced exactly identical FAT segmentations: 2012 voxels on the
 left and 2526 on the right, with identical image geometry. The TCK files differ
 because seed positions are random and iFOD2 additionally samples directions
-probabilistically. Both scripts use the same default iFOD2/SD_STREAM parameters
-and the same final containment filter.
+probabilistically. Those earlier scripts used the same default iFOD2/SD_STREAM
+parameters and the same final containment filter, without mandatory endpoint checks.
 
 FACT, density maps, and optional FA summaries are additional features of the
 extended workflow, rather than outputs of the simple script.
@@ -68,12 +101,15 @@ do not establish a complete FAT reconstruction.
 
 ## Automated checks
 
-- 21 regression tests passed.
+- 27 regression tests passed.
 - ShellCheck and Ruff reported no issues.
 - mypy reported no type errors.
 - Tests cover mask-union errors, outside vertices, segments crossing mask holes,
   very short diagonal boundary crossings, oblique image geometry, grid mismatches,
   NaN handling, and insufficient accepted streamline counts.
+- New checks cover end-region generation in flipped/oblique world coordinates,
+  disconnected masks, overlapping ROIs, fragments, tracks that only visit ROIs
+  internally, reversed endpoint order, and standalone end-region CLI usage.
 
 ```bash
 bash tests/verify.sh
@@ -88,12 +124,10 @@ runtime dependencies. `SHELLCHECK=/path/to/shellcheck` can select a specific bin
 external `scripts/` directory. A regression test checks that its embedded code
 matches the verified helper used by the extended workflow exactly.
 
-The standalone test copies only `fat_simple.sh` into a separate directory, validates
-synthetic input images, and filters a TCK file using the embedded helper. The saved
-tractogram is then checked for streamline count and mask containment. Shell syntax,
-ShellCheck, Python lint, and type checks pass. Embedding the helper did not change
-tracking parameters or filtering algorithms, so no new model inference was needed
-for that packaging change.
+Standalone tests copy only `fat_simple.sh` into a separate directory, validate
+synthetic input images, derive end regions, and filter a TCK file using the
+embedded helper. Saved tracks are checked for count, containment, and opposite
+endpoints. Shell syntax, ShellCheck, Python lint, and type checks pass.
 
 The original failed runs and intermediate files were removed during cleanup.
 Thirty-five retained final result files were checked by SHA-256 to confirm they
@@ -102,8 +136,9 @@ paths may still appear in those local logs.
 
 ## Limits
 
-The optional `DENSITY=1`, `COMPUTE_FA=1`, and external anatomical ROI branches were
-not run against additional real data. The FAT model has no learned endpoint
+The current endpoint-constrained FACT branch and the optional `DENSITY=1`,
+`COMPUTE_FA=1`, and external anatomical ROI branches were not validated on
+additional real data. The FAT model has no learned endpoint
 masks or TOMs, and containment does not establish anatomical completeness or
 endpoint correspondence.
 

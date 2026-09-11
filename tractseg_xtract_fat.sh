@@ -10,7 +10,7 @@ Usage: tractseg_xtract_fat.sh [segment|run|check|dry-run] [DWI_DIR ...]
 
 Default: segment the bundled mri/ example. Multiple DWI_DIRs enable batch mode.
 segment  TractSeg --tract_definition xtract; export FAT_left/right masks.
-run      Additionally run MRtrix tracking inside the predicted FAT masks.
+run      Track connections between two mask-derived end regions, inside the FAT mask.
 check    Validate dependencies, input dimensions and image grids; no inference.
 dry-run  Validate inputs and print commands; no output directory is created.
 
@@ -23,15 +23,16 @@ Environment:
   ALGORITHMS="iFOD2 SD_STREAM FACT"  Tracking algorithms for run/dry-run.
   N_STREAMLINES=2000  MAX_SEEDS=2000000
   Twice N_STREAMLINES candidates are generated; retain exactly N_STREAMLINES
-  whole streamlines whose vertices AND connecting segments stay inside the mask.
+  whole streamlines inside the mask, with endpoints in opposite end regions.
   MIN_LENGTH=20   MAX_LENGTH=150   CUTOFF=0.1
   DENSITY=0       Also predict XTRACT density maps (1 to enable).
   COMPUTE_FA=0    Fit FA from dwi_den_unr_pre_unbia.mif if absent (1 to enable).
   ROI_DIR         Optional native-space fa_l/{seed,target,exclude}.nii.gz and
                   fa_r/{seed,target,exclude}.nii.gz; all six files required.
 
-No FAT TOM/endings model exists. MRtrix outputs are mask-constrained streamlines,
-not TractSeg endpoint-filtered bundles and not FSL XTRACT/probtrackx results.
+No FAT TOM/endings model exists. Default end regions are geometric terminal caps
+of each individual's predicted mask, not learned anatomical IFG/SMA labels.
+No training is performed; the pretrained TractSeg model predicts subject masks.
 See README.md before interpreting patient results.
 EOF
 }
@@ -113,7 +114,7 @@ for input in "$@"; do
   "$PYTHON" "$SCRIPT_DIR/scripts/fat_qc.py" "${qc_args[@]}"
   [[ "$MODE" != check ]] || continue
   [[ ! -e "$out" ]] || die "Output already exists: $out. Choose a new OUTPUT_DIR to avoid mixing runs."
-  run mkdir -p "$out/work" "$out/bundle_segmentations" "$out/tractometry"
+  run mkdir -p "$out/work" "$out/bundle_segmentations" "$out/endings_segmentations" "$out/tractometry"
   if [[ "$MODE" != dry-run ]]; then
     exec 3>&1 4>&2
     exec > >(tee "$out/pipeline.log") 2>&1
@@ -149,6 +150,16 @@ for input in "$@"; do
     run cp "$out/work/xtract_model/dm_regression/fa_r.nii.gz" "$out/density_maps/FAT_right.nii.gz"
   fi
   if [[ "$MODE" == run || "$MODE" == dry-run ]]; then
+    for pair in 'fa_l FAT_left' 'fa_r FAT_right'; do
+      read -r tract name <<< "$pair"
+      if [[ -n "${ROI_DIR:-}" ]]; then
+        run cp "$ROI_DIR/$tract/seed.nii.gz" "$out/endings_segmentations/${name}_b.nii.gz"
+        run cp "$ROI_DIR/$tract/target.nii.gz" "$out/endings_segmentations/${name}_e.nii.gz"
+      else
+        run "$PYTHON" "$SCRIPT_DIR/scripts/fat_qc.py" endings "$out/bundle_segmentations/$name.nii.gz" \
+          "$out/endings_segmentations/${name}_b.nii.gz" "$out/endings_segmentations/${name}_e.nii.gz"
+      fi
+    done
     if [[ -z "$scalar" && "$COMPUTE_FA" == 1 ]]; then
       run dwi2tensor "$input/dwi_den_unr_pre_unbia.mif" "$out/work/tensors.mif" -mask "$mask" -nthreads "$NTHREADS"
       run tensor2metric "$out/work/tensors.mif" -fa "$out/work/fa.nii.gz" -nthreads "$NTHREADS"
@@ -161,20 +172,21 @@ for input in "$@"; do
         bundle="$out/bundle_segmentations/$name.nii.gz"
         tracks="$out/${algorithm}_trackings/$name.tck"
         candidates="$out/work/${name}_${algorithm}_candidates.tck"
+        begin="$out/endings_segmentations/${name}_b.nii.gz"
+        end="$out/endings_segmentations/${name}_e.nii.gz"
         source="$fod"
         [[ "$algorithm" != FACT ]] || source="$peaks"
-        roi_args=(-seed_image "$bundle")
+        roi_args=(-seed_image "$begin" -include "$begin" -include "$end" -seed_unidirectional -stop)
         if [[ -n "${ROI_DIR:-}" ]]; then
-          roi_args=(-seed_image "$ROI_DIR/$tract/seed.nii.gz" -include "$ROI_DIR/$tract/seed.nii.gz"
-            -include "$ROI_DIR/$tract/target.nii.gz" -exclude "$ROI_DIR/$tract/exclude.nii.gz")
+          roi_args+=(-exclude "$ROI_DIR/$tract/exclude.nii.gz")
         fi
         # Multiple MRtrix -mask options are a UNION, not an intersection.
         # Use only the undilated bundle mask, as in TractSeg's tracking code.
         run tckgen "$source" "$candidates" -algorithm "$algorithm" "${roi_args[@]}" -mask "$bundle" \
           -select "$((N_STREAMLINES * 2))" -seeds "$MAX_SEEDS" -minlength "$MIN_LENGTH" -downsample 1 \
           -maxlength "$MAX_LENGTH" -cutoff "$CUTOFF" -nthreads "$NTHREADS"
-        run "$PYTHON" "$SCRIPT_DIR/scripts/fat_qc.py" filter-tracks "$candidates" "$bundle" "$tracks" "$N_STREAMLINES"
-        run "$PYTHON" "$SCRIPT_DIR/scripts/fat_qc.py" tracks "$tracks" "$N_STREAMLINES" --mask "$bundle"
+        run "$PYTHON" "$SCRIPT_DIR/scripts/fat_qc.py" filter-tracks "$candidates" "$bundle" "$tracks" "$N_STREAMLINES" --endings "$begin" "$end"
+        run "$PYTHON" "$SCRIPT_DIR/scripts/fat_qc.py" tracks "$tracks" "$N_STREAMLINES" --mask "$bundle" --endings "$begin" "$end"
         run tckmap "$tracks" "$out/track_density/$algorithm/$name.nii.gz" -template "$bundle" -upsample 1 -nthreads "$NTHREADS"
         if [[ -n "$scalar" ]]; then
           run tcksample "$tracks" "$scalar" "$out/tractometry/${name}_${algorithm}_mean_FA.csv" \
