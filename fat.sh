@@ -1,3 +1,194 @@
+#!/usr/bin/env bash
+# Author: Lucius Fekonja
+# HCP1065 atlas: Yeh (2022), doi:10.1038/s41467-022-32595-4, CC BY-SA 4.0.
+
+usage() {
+  cat <<'EOF'
+Usage: bash fat.sh --input MRI_DIR [options]
+       bash fat.sh --setup-atlas [--atlas-dir DIR]
+
+  --input, -i DIR          Folder containing wm.nii.gz/wm.mif and t1_brain.nii.gz
+  --output, -o DIR         New output directory (default: MRI_DIR/fat_output)
+  --algorithm, -a NAME     iFOD2 (default), SD_STREAM, FACT, Tensor_Det, Tensor_Prob
+                          Use commas to select several algorithms.
+  --streamlines, -n N      Final streamlines per side and algorithm (2000)
+  --cutoff FLOAT          FOD/peak amplitude cutoff (0.05)
+  --tensor-fa FLOAT       Tensor FA cutoff (0.1)
+  --min-length MM        Minimum streamline length (20)
+  --max-length MM        Maximum streamline length (150)
+  --threads N            CPU threads (4)
+  --max-seeds N          Maximum seed attempts per side/algorithm (2000000)
+  --candidates N         Candidates per side (2 x streamlines; 4 x for tensors)
+  --mask-threshold FLOAT HCP1065 probability threshold (0.05)
+  --mask-margin MM       Bundle mask margin (3)
+  --roi-margin MM        Cortical end-region margin (3)
+  --dwi FILE             DWI .mif with gradients for tensor tracking
+                         (default: MRI_DIR/dwi_den_unr_pre_unbia.mif)
+  --t1 FILE              Brain-extracted T1 (default: MRI_DIR/t1_brain.nii.gz)
+  --atlas-dir DIR        Installed atlas directory
+                         (default: ~/.cache/tractseg_xtract_fat/hcp1065)
+  --fsl-dir DIR          FSL installation (default: FSLDIR)
+  --t1-to-mni-prefix P   Reuse ANTs T1-to-FSL-MNI152 transforms
+  --t1-to-icbm-prefix P  Reuse ANTs T1-to-ICBM2009a transforms
+  --t1-to-dwi-affine F   Reuse ANTs rigid T1-to-DWI transform
+  --setup-atlas          Download, verify and prepare atlas files; then exit
+  --check                Check prerequisites and inputs; then exit
+  --dry-run              Check inputs and print commands without creating output
+  --help, -h             Show this help
+EOF
+}
+die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "Required command missing: $1"; }
+run() {
+  printf '+'; printf ' %q' "$@"; printf '\n'
+  if [[ "$mode" != dry-run ]]; then
+    { printf '+'; printf ' %q' "$@"; printf '\n'; } >> "$out/commands.log"
+    "$@"
+  fi
+}
+
+run_fat_pipeline() {
+  set -euo pipefail
+  local input="" out="" mode=run algorithm_list=iFOD2
+  local streamlines=2000 cutoff=0.05 tensor_fa=0.1 min_length=20 max_length=150
+  local threads=4 max_seeds=2000000 candidates="" mask_threshold=0.05 mask_margin=3 roi_margin=3
+  local t1="" dwi="" atlas_dir="${HOME}/.cache/tractseg_xtract_fat/hcp1065" fsl_dir="${FSLDIR:-}"
+  local mni_prefix="" icbm_prefix="" dwi_affine="" value algorithm
+  local -a algorithms atlas_args
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --help|-h) usage; return ;;
+      --setup-atlas|--check|--dry-run)
+        [[ "$mode" == run ]] || die 'Choose one of --setup-atlas, --check or --dry-run.'
+        mode="${1#--}"; shift; continue ;;
+      --input|-i|--output|-o|--algorithm|-a|--streamlines|-n|--cutoff|--tensor-fa|--min-length|--max-length|--threads|--max-seeds|--candidates|--mask-threshold|--mask-margin|--roi-margin|--dwi|--t1|--atlas-dir|--fsl-dir|--t1-to-mni-prefix|--t1-to-icbm-prefix|--t1-to-dwi-affine)
+        [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || die "Value missing for $1"
+        value="$2" ;;
+      *) die "Unknown option: $1. Use --help." ;;
+    esac
+    case "$1" in
+      --input|-i) input="$value" ;; --output|-o) out="$value" ;;
+      --algorithm|-a) algorithm_list="$value" ;; --streamlines|-n) streamlines="$value" ;;
+      --cutoff) cutoff="$value" ;; --tensor-fa) tensor_fa="$value" ;;
+      --min-length) min_length="$value" ;; --max-length) max_length="$value" ;;
+      --threads) threads="$value" ;; --max-seeds) max_seeds="$value" ;;
+      --candidates) candidates="$value" ;; --mask-threshold) mask_threshold="$value" ;;
+      --mask-margin) mask_margin="$value" ;; --roi-margin) roi_margin="$value" ;;
+      --dwi) dwi="$value" ;; --t1) t1="$value" ;; --atlas-dir) atlas_dir="$value" ;;
+      --fsl-dir) fsl_dir="$value" ;; --t1-to-mni-prefix) mni_prefix="$value" ;;
+      --t1-to-icbm-prefix) icbm_prefix="$value" ;; --t1-to-dwi-affine) dwi_affine="$value" ;;
+    esac
+    shift 2
+  done
+  need "${PYTHON:-python3}"
+  if [[ "$mode" == setup-atlas ]]; then
+    [[ -z "$input" && -z "$out" ]] || die '--setup-atlas is an installation step; omit --input and --output.'
+    need curl
+    fat_qc setup-atlas "$atlas_dir"
+    return
+  fi
+
+  # Check the requested settings, installed resources and subject inputs.
+  for value in "$threads" "$streamlines" "$max_seeds" "${candidates:-1}"; do
+    [[ "$value" =~ ^[1-9][0-9]*$ ]] || die 'Threads and streamline/seed counts must be positive integers.'
+  done
+  [[ -z "$candidates" || "$candidates" -ge "$streamlines" ]] || die '--candidates must be at least --streamlines.'
+  [[ "$algorithm_list" != ,* && "$algorithm_list" != *, && "$algorithm_list" != *,,* ]] || die 'Empty algorithm in list.'
+  IFS=, read -r -a algorithms <<< "$algorithm_list"
+  for algorithm in "${algorithms[@]}"; do
+    case "$algorithm" in iFOD2|SD_STREAM|FACT|Tensor_Det|Tensor_Prob) ;; *) die "Unsupported algorithm: $algorithm" ;; esac
+  done
+  fat_qc parameters "$min_length" "$max_length" "$cutoff" --tensor-fa "$tensor_fa" \
+    --mask-threshold "$mask_threshold" --mask-margin "$mask_margin" --roi-margin "$roi_margin"
+  [[ -d "$input" ]] || die 'Set --input to the subject MRI directory.'
+  input="$(cd "$input" && pwd)"
+  out="${out:-$input/fat_output}"
+  [[ "$mode" == check || ! -e "$out" ]] || die "Output already exists: $out. Choose a new --output directory."
+  local fod="$input/wm.nii.gz" peaks="$input/peaks.nii.gz" tensor_bvalue=""
+  [[ -f "$fod" ]] || fod="$input/wm.mif"
+  t1="${t1:-$input/t1_brain.nii.gz}"
+  dwi="${dwi:-$input/dwi_den_unr_pre_unbia.mif}"
+  for value in mrinfo mrconvert tckgen antsRegistrationSyNQuick.sh antsRegistration antsApplyTransforms; do need "$value"; done
+  fat_qc inputs --fod "$fod"
+  fat_qc prerequisites --atlas-dir "$atlas_dir" --fsl-dir "$fsl_dir" --t1 "$t1"
+  for algorithm in "${algorithms[@]}"; do
+    if [[ "$algorithm" == FACT ]]; then
+      need sh2peaks
+      [[ ! -f "$peaks" ]] || fat_qc inputs --fod "$fod" --peaks "$peaks"
+    elif [[ "$algorithm" == Tensor_* && -z "$tensor_bvalue" ]]; then
+      need dwiextract
+      tensor_bvalue="$(fat_qc tensor-shell "$dwi" "$fod")"
+    fi
+  done
+  [[ "$mode" != check ]] || { printf 'Prerequisites and inputs OK.\n'; return; }
+  if [[ "$mode" != dry-run ]]; then mkdir -p "$out/work"; fi
+  export OMP_NUM_THREADS="$threads" ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS="$threads" MKL_NUM_THREADS="$threads"
+  run fat_qc settings "$out/run.json" "input=$input" "t1=$t1" "dwi=$dwi" "atlas_dir=$atlas_dir" \
+    "algorithms=$algorithm_list" "streamlines=$streamlines" "cutoff=$cutoff" "tensor_fa=$tensor_fa" \
+    "min_length_mm=$min_length" "max_length_mm=$max_length" "threads=$threads" "max_seeds=$max_seeds" \
+    "candidates=${candidates:-auto}" "mask_threshold=$mask_threshold" "mask_margin_mm=$mask_margin" "roi_margin_mm=$roi_margin"
+
+  # Register the probability maps and cortical labels into the diffusion grid.
+  atlas_args=(--threads "$threads" --atlas-dir "$atlas_dir")
+  [[ -z "$mni_prefix" ]] || atlas_args+=(--mni-prefix "$mni_prefix")
+  [[ -z "$icbm_prefix" ]] || atlas_args+=(--icbm-prefix "$icbm_prefix")
+  [[ -z "$dwi_affine" ]] || atlas_args+=(--dwi-affine "$dwi_affine")
+  run mrconvert "$fod" "$out/work/dwi_reference.nii.gz" -coord 3 0 -nthreads "$threads"
+  run fat_qc atlas-to-subject --t1 "$t1" --reference "$out/work/dwi_reference.nii.gz" \
+    --fsl-dir "$fsl_dir" --out "$out/work/atlas" "${atlas_args[@]}"
+  local name
+  for name in FAT_left FAT_right; do
+    run fat_qc probability-bundle "$out/work/atlas/${name}_probability.nii.gz" \
+      "$out/bundle_segmentations_original/$name.nii.gz" "$out/bundle_segmentations/$name.nii.gz" \
+      --threshold "$mask_threshold" --margin "$mask_margin"
+    run fat_qc endings "$out/work/atlas/endings_native.nii.gz" "$out/bundle_segmentations/$name.nii.gz" \
+      "${name#FAT_}" "$out" --radius "$roi_margin"
+  done
+
+  # Prepare the input for each selected tracking algorithm.
+  if [[ ",$algorithm_list," == *,FACT,* ]]; then
+    if [[ ! -f "$peaks" ]]; then
+      peaks="$out/work/peaks_raw.nii.gz"
+      run sh2peaks "$fod" "$peaks" -num 3 -nthreads "$threads"
+    fi
+    run fat_qc prepare-peaks "$peaks" "$out/work/peaks.nii.gz"
+    peaks="$out/work/peaks.nii.gz"
+  fi
+  if [[ -n "$tensor_bvalue" ]]; then
+    run dwiextract "$dwi" "$out/work/tensor_dwi.mif" -shells "0,$tensor_bvalue" -nthreads "$threads"
+  fi
+
+  # Track complete connections and retain the requested number inside the mask.
+  local source tracking_cutoff candidate_count bundle begin end tracks candidate_file
+  for algorithm in "${algorithms[@]}"; do
+    source="$fod"; tracking_cutoff="$cutoff"; candidate_count="$((streamlines * 2))"
+    [[ "$algorithm" != FACT ]] || source="$peaks"
+    if [[ "$algorithm" == Tensor_* ]]; then
+      source="$out/work/tensor_dwi.mif"; tracking_cutoff="$tensor_fa"; candidate_count="$((streamlines * 4))"
+    fi
+    candidate_count="${candidates:-$candidate_count}"
+    run mkdir -p "$out/${algorithm}_trackings"
+    for name in FAT_left FAT_right; do
+      bundle="$out/bundle_segmentations/$name.nii.gz"
+      begin="$out/endings_segmentations/${name}_b.nii.gz"
+      end="$out/endings_segmentations/${name}_e.nii.gz"
+      tracks="$out/${algorithm}_trackings/$name.tck"
+      candidate_file="$out/work/${name}_${algorithm}_candidates.tck"
+      run tckgen "$source" "$candidate_file" -algorithm "$algorithm" \
+        -seed_image "$out/seed_masks/${name}_b.nii.gz" -include "$begin" -include "$end" -mask "$bundle" \
+        -select "$candidate_count" -seeds "$max_seeds" -minlength "$min_length" -maxlength "$max_length" \
+        -cutoff "$tracking_cutoff" -downsample 1 -nthreads "$threads"
+      run fat_qc filter-tracks "$candidate_file" "$bundle" "$tracks" "$streamlines" --endings "$begin" "$end"
+      run fat_qc tracks "$tracks" "$streamlines" --mask "$bundle" --endings "$begin" "$end"
+    done
+  done
+  run fat_qc summary "$out"
+  run touch "$out/SUCCESS"
+}
+
+# Embedded image preparation and streamline checks.
+fat_qc() {
+  "${PYTHON:-python3}" - "$@" <<'FAT_QC_PY'
 """FAT atlas preparation, bounded mask processing and whole-streamline checks."""
 
 import argparse
@@ -220,7 +411,7 @@ def checked_archive(path: Path, url: str, expected: str) -> None:
         raise ValueError(f"Atlas cache checksum mismatch: {path}")
 
 
-def hcp_resources(folder: Path) -> Path:
+def setup_atlas(folder: Path) -> Path:
     """HCP1065 probabilities and the matching ICBM2009a asymmetrical T1."""
     probability = folder / 'hcp1065_probability.zip'
     template = folder / 'icbm2009a.zip'
@@ -245,7 +436,40 @@ def hcp_resources(folder: Path) -> Path:
     brain = folder / 'ICBM2009a_T1_brain.nii.gz'
     nib.save(nib.Nifti1Image((t1.get_fdata() * (mask.get_fdata() > 0)).astype(np.float32),
                            t1.affine), brain)
+    files = {name: hashlib.sha256((folder / name).read_bytes()).hexdigest()
+             for name in ATLAS_FILES}
+    (folder / 'atlas_manifest.json').write_text(json.dumps(files, indent=2) + '\n')
+    print(f"Atlas installed: {folder.resolve()}")
     return brain
+
+
+ATLAS_FILES = ('Frontal_Aslant_Tract_L.nii.gz', 'Frontal_Aslant_Tract_R.nii.gz',
+               'ICBM2009a_T1_brain.nii.gz', 'ICBM_COPYING.txt')
+
+
+def installed_atlas(folder: Path) -> Path:
+    """Verify prepared resources without downloads or filesystem changes."""
+    manifest = folder / 'atlas_manifest.json'
+    if not manifest.is_file():
+        raise ValueError(f"Atlas is not installed in {folder}. Run bash fat.sh --setup-atlas --atlas-dir {shlex.quote(str(folder))}")
+    files = json.loads(manifest.read_text())
+    for name in ATLAS_FILES:
+        path = folder / name
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != files.get(name):
+            raise ValueError(f"Atlas file missing or checksum mismatch: {path}. Repeat --setup-atlas.")
+    return folder / 'ICBM2009a_T1_brain.nii.gz'
+
+
+def prerequisites(folder: Path, fsl: Path, t1: Path) -> None:
+    installed_atlas(folder)
+    for relative in ('data/atlases/HarvardOxford/HarvardOxford-cort-maxprob-thr25-1mm.nii.gz',
+                     'data/atlases/HarvardOxford-Cortical.xml',
+                     'data/standard/MNI152_T1_1mm_brain.nii.gz'):
+        if not (fsl / relative).is_file():
+            raise ValueError(f"Missing FSL file: {fsl / relative}. Set FSLDIR or --fsl-dir.")
+    image = load_nifti(t1)
+    if len(image.shape) != 3 or not np.isfinite(image.get_fdata()).all():
+        raise ValueError('T1 must be a finite 3D brain-extracted image.')
 
 
 def probability_bundle(source: Path, original: Path, destination: Path,
@@ -302,7 +526,7 @@ def atlas_to_subject(t1: Path, reference: Path, fsl_dir: Path, out: Path,
     t1_img = load_nifti(t1)
     if len(t1_img.shape) != 3 or not np.isfinite(t1_img.get_fdata()).all():
         raise ValueError("T1 must be a finite 3D brain-extracted image of this subject.")
-    icbm_template = hcp_resources(atlas_dir)
+    icbm_template = installed_atlas(atlas_dir)
     out.mkdir(parents=True)
     ref_img = load_nifti(reference)
     ref_data = np.asanyarray(ref_img.dataobj)
@@ -538,37 +762,33 @@ def summary(out: Path) -> None:
             writer.writerow([path.name, f"{region.sum() * abs(np.linalg.det(img.affine[:3, :3])):.3f}",
                              int(region.sum()), int((region & bundle).sum())])
     (out / "METHOD.txt").write_text(
-        "Bundle prior: HCP1065 population probability coverage, registered via subject T1 using ICBM2009a.\n"
-        "No training, TractSeg inference, or intersection with an XTRACT mask in the default workflow.\n"
-        "Native probability images: work/atlas/FAT_*_probability.nii.gz.\n"
-        "Threshold 0.05 is a workflow default, not a clinically validated FAT boundary.\n"
-        "Raw threshold masks: bundle_segmentations_original; processed masks: bundle_segmentations.\n"
-        "Keep the largest face-connected component only if it contains at least 95% of threshold voxels.\n"
-        "Mask processing: 3 mm bounded margin, Gaussian sigma 1 mm, threshold 0.5; preserve the retained component.\n"
-        "Cavity filling is limited to that margin; disconnected processed masks fail.\n"
-        "Tracking: MRtrix with ONE processed bundle mask.\n"
-        "Default FOD/peak cutoff 0.05; tensor FA cutoff 0.1 (b0 plus lowest nonzero DWI shell).\n"
-        "Whole streamlines leaving the mask are rejected; all vertices AND connecting segments are checked.\n"
-        "Track in both directions from each seed, without stopping at the first complete set of ROI contacts.\n"
-        "Tracking requires both endpoints in opposite end regions, in addition to whole-polyline containment.\n"
-        "Cortical priors: Harvard-Oxford maxprob thr25 IFG pars opercularis/triangularis and SFG plus SMA.\n"
-        "Cortex uses a separate FSL MNI152 registration; do not interchange its warp with ICBM2009a.\n"
-        "Atlas labels are warped via subject T1 to DWI, then dilated 3 mm; inspect registration individually.\n"
-        "Full cortex labels: anatomical_rois; expanded endpoints: endings_segmentations; mask intersections: seed_masks.\n"
-        "Population cortical labels approximate anatomical targets; they are not individual functional maps.\n"
-        "No learned FAT endings or TOMs. Insufficient valid connections cause failure, not a partial final bundle.\n"
-        "Mean FA CSVs: one mean per streamline, NOT spatially corresponding along-tract profiles.\n"
-        "Optional XTRACT dm_regression is a separate comparison, not the HCP1065 tracking mask.\n"
+        "HCP1065 FAT probabilities registered through the subject T1 into diffusion space.\n"
+        "Cortical targets: Harvard-Oxford IFG pars opercularis/triangularis and SFG/SMA.\n"
+        "Tracking and final polyline checks use bundle_segmentations.\n"
+        "Each retained streamline connects opposite regions in endings_segmentations.\n"
+        "Effective settings: run.json; executed commands: commands.log.\n"
+        "Atlas: Yeh (2022), doi:10.1038/s41467-022-32595-4, CC BY-SA 4.0.\n"
     )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("setup-atlas").add_argument("folder", type=Path)
+    prereq = sub.add_parser("prerequisites")
+    for name in ("atlas-dir", "fsl-dir", "t1"):
+        prereq.add_argument(f"--{name}", type=Path, required=True)
+    settings = sub.add_parser("settings")
+    settings.add_argument("destination", type=Path)
+    settings.add_argument("values", nargs="+")
     parameters = sub.add_parser("parameters")
     parameters.add_argument("minimum", type=float)
     parameters.add_argument("maximum", type=float)
     parameters.add_argument("cutoff", type=float)
+    parameters.add_argument("--tensor-fa", type=float, default=0.1)
+    parameters.add_argument("--mask-threshold", type=float, default=0.05)
+    parameters.add_argument("--mask-margin", type=float, default=3)
+    parameters.add_argument("--roi-margin", type=float, default=3)
     inputs = sub.add_parser("inputs")
     inputs.add_argument("--peaks", type=Path)
     inputs.add_argument("--fod", type=Path)
@@ -618,11 +838,24 @@ def main() -> None:
     filtering.add_argument("--endings", nargs=2, type=Path, metavar=("BEGIN", "END"))
     sub.add_parser("summary").add_argument("out", type=Path)
     args = parser.parse_args()
-    if args.command == "parameters":
+    if args.command == "setup-atlas":
+        setup_atlas(args.folder)
+    elif args.command == "prerequisites":
+        prerequisites(args.atlas_dir, args.fsl_dir, args.t1)
+    elif args.command == "settings":
+        args.destination.write_text(json.dumps(dict(v.split("=", 1) for v in args.values), indent=2) + "\n")
+    elif args.command == "parameters":
         if not all(math.isfinite(x) for x in (args.minimum, args.maximum, args.cutoff)):
             raise ValueError("Tracking parameters must be finite.")
         if not 0 < args.minimum < args.maximum or args.cutoff <= 0:
-            raise ValueError("Require 0 < MIN_LENGTH < MAX_LENGTH and CUTOFF > 0.")
+            raise ValueError("Require 0 < --min-length < --max-length and --cutoff > 0.")
+        if not math.isfinite(args.tensor_fa) or not 0 < args.tensor_fa < 1:
+            raise ValueError("--tensor-fa must be between 0 and 1.")
+        if not math.isfinite(args.mask_threshold) or not 0 < args.mask_threshold < 1:
+            raise ValueError("--mask-threshold must be between 0 and 1.")
+        for value in (args.mask_margin, args.roi_margin):
+            if not math.isfinite(value) or value < 0:
+                raise ValueError("Mask and ROI margins must be finite and nonnegative.")
     elif args.command == "inputs":
         validate_inputs(args.peaks, args.fod, args.scalar)
     elif args.command == "tensor-shell":
@@ -658,3 +891,9 @@ if __name__ == "__main__":
     except (ValueError, OSError, subprocess.CalledProcessError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         sys.exit(1)
+FAT_QC_PY
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  run_fat_pipeline "$@"
+fi

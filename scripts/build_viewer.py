@@ -6,6 +6,7 @@ Usage: python3 scripts/build_viewer.py --fod-results RESULTS --extra-results RES
 
 import argparse
 import json
+import types
 from pathlib import Path
 
 import nibabel as nib
@@ -14,7 +15,11 @@ from plotly.offline import get_plotlyjs
 from scipy.ndimage import gaussian_filter
 from skimage.measure import marching_cubes
 
-from fat_qc import check_tracks, load_nifti, same_grid
+qc = types.ModuleType("fat_qc")
+source = (Path(__file__).resolve().parents[1] / "fat.sh").read_text()
+embedded = source.split("<<'FAT_QC_PY'\n", 1)[1].split("\nFAT_QC_PY\n", 1)[0]
+exec(compile(embedded, "fat.sh", "exec"), qc.__dict__)
+check_tracks, load_nifti, same_grid = qc.check_tracks, qc.load_nifti, qc.same_grid
 
 
 def mesh(path: Path) -> dict:

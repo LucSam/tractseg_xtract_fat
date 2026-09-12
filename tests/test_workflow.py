@@ -1,6 +1,8 @@
 """Regression tests use tiny synthetic images and real MRtrix image readers."""
 
-import importlib.util
+import hashlib
+import json
+import types
 import os
 from pathlib import Path
 import shlex
@@ -14,10 +16,9 @@ import nibabel as nib
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("fat_qc", ROOT / "scripts/fat_qc.py")
-assert SPEC is not None and SPEC.loader is not None
-qc = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(qc)
+qc = types.ModuleType("fat_qc")
+embedded = (ROOT / "fat.sh").read_text().split("<<'FAT_QC_PY'\n", 1)[1].split("\nFAT_QC_PY\n", 1)[0]
+exec(compile(embedded, str(ROOT / "fat.sh"), "exec"), qc.__dict__)
 
 
 class WorkflowTests(unittest.TestCase):
@@ -28,6 +29,20 @@ class WorkflowTests(unittest.TestCase):
         self.peaks = self.save("peaks.nii.gz", np.ones((4, 5, 6, 9)))
         self.fod = self.save("wm.nii.gz", np.ones((4, 5, 6, 45)))
         self.save("t1_brain.nii.gz", np.ones((4, 5, 6)))
+        self.atlas = self.folder / "installed atlas"
+        self.atlas.mkdir()
+        for name in qc.ATLAS_FILES:
+            (self.atlas / name).write_bytes(b"test resource")
+        manifest = {name: hashlib.sha256((self.atlas / name).read_bytes()).hexdigest()
+                    for name in qc.ATLAS_FILES}
+        (self.atlas / "atlas_manifest.json").write_text(json.dumps(manifest))
+        self.fsl = self.folder / "fsl"
+        for name in ("data/atlases/HarvardOxford/HarvardOxford-cort-maxprob-thr25-1mm.nii.gz",
+                     "data/atlases/HarvardOxford-Cortical.xml",
+                     "data/standard/MNI152_T1_1mm_brain.nii.gz"):
+            path = self.fsl / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
 
     def save(self, name: str, data: np.ndarray, shift: float = 0) -> Path:
         path = self.folder / name
@@ -36,14 +51,10 @@ class WorkflowTests(unittest.TestCase):
         nib.save(nib.Nifti1Image(data.astype(np.float32), affine), path)
         return path
 
-    def cli(self, *args: str, **env: str) -> subprocess.CompletedProcess:
-        environment = os.environ.copy()
-        for key in ("OUTPUT_DIR", "ROI_DIR", "DENSITY", "ALGORITHMS", "COMPUTE_FA", "T1", "T1_TO_MNI_PREFIX", "T1_TO_DWI_AFFINE"):
-            environment.pop(key, None)
-        environment.update(env)
+    def cli(self, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run(
-            ["bash", str(ROOT / "tractseg_xtract_fat.sh"), *args],
-            text=True, capture_output=True, env=environment,
+            ["bash", str(ROOT / "fat.sh"), "--atlas-dir", str(self.atlas),
+             "--fsl-dir", str(self.fsl), *args], text=True, capture_output=True,
         )
 
     def test_input_grid_passes(self) -> None:
@@ -91,7 +102,7 @@ class WorkflowTests(unittest.TestCase):
     def test_tensor_input_selects_lowest_shell_and_preserves_read_only_check(self) -> None:
         dwi = self.tensor_input()
         self.assertAlmostEqual(qc.tensor_shell(dwi, self.fod), 1500)
-        result = self.cli("dry-run", str(self.folder), ALGORITHMS="Tensor_Det Tensor_Prob", DWI=str(dwi))
+        result = self.cli("--dry-run", "--input", str(self.folder), "--algorithm", "Tensor_Det,Tensor_Prob", "--dwi", str(dwi))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         commands = [shlex.split(line[2:]) for line in result.stdout.splitlines() if line.startswith("+ ")]
         extraction = next(cmd for cmd in commands if cmd[0] == "dwiextract")
@@ -99,10 +110,10 @@ class WorkflowTests(unittest.TestCase):
         for cmd in (cmd for cmd in commands if cmd[0] == "tckgen"):
             self.assertEqual(cmd[1], extraction[2])
             self.assertEqual(cmd[cmd.index("-cutoff") + 1], "0.1")
-        self.assertFalse((self.folder / "tractseg_xtract_fat_output").exists())
+        self.assertFalse((self.folder / "fat_output").exists())
 
     def test_tensor_input_rejects_missing_gradients(self) -> None:
-        result = self.cli("check", str(self.folder), ALGORITHMS="Tensor_Det", DWI=str(self.fod))
+        result = self.cli("--check", "--input", str(self.folder), "--algorithm", "Tensor_Det", "--dwi", str(self.fod))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("gradient", result.stderr.lower())
 
@@ -286,7 +297,7 @@ class WorkflowTests(unittest.TestCase):
                 for suffix in ("0GenericAffine.mat", "1InverseWarp.nii.gz"):
                     Path(prefix + suffix).touch()
 
-        with patch.object(qc, "hcp_resources", return_value=template), \
+        with patch.object(qc, "installed_atlas", return_value=template), \
                 patch.object(qc, "make_atlas_labels"), patch.object(qc.subprocess, "run", side_effect=run):
             qc.atlas_to_subject(self.folder / "t1_brain.nii.gz", self.fod, fsl, out,
                                 mni_prefix=mni_prefix, dwi_affine=rigid)
@@ -384,24 +395,22 @@ class WorkflowTests(unittest.TestCase):
 
     def test_dry_run_with_spaces_is_read_only(self) -> None:
         out = self.folder / "not created"
-        result = self.cli("dry-run", str(self.folder), OUTPUT_DIR=str(out))
+        result = self.cli("--dry-run", "--input", str(self.folder), "--output", str(out))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(out.exists())
         self.assertIn("probability-bundle", result.stdout)
-        self.assertNotIn("+ TractSeg ", result.stdout)
-        self.assertNotIn("--output_type TOM", result.stdout)
         self.assertIn("FAT_right.tck", result.stdout)
 
     def test_existing_output_is_protected(self) -> None:
-        result = self.cli("segment", str(self.folder), OUTPUT_DIR=str(self.folder))
+        result = self.cli("--input", str(self.folder), "--output", str(self.folder))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Output already exists", result.stderr)
 
     def test_system_bash_allows_automatic_registration_without_cached_transforms(self) -> None:
         environment = os.environ.copy()
-        environment.update(T1_TO_MNI_PREFIX="", T1_TO_DWI_AFFINE="", ROI_DIR="", ALGORITHMS="iFOD2")
         result = subprocess.run(
-            ["/bin/bash", str(ROOT / "tractseg_xtract_fat.sh"), "dry-run", str(self.folder)],
+            ["/bin/bash", str(ROOT / "fat.sh"), "--dry-run", "--input", str(self.folder),
+             "--atlas-dir", str(self.atlas), "--fsl-dir", str(self.fsl)],
             env=environment, text=True, capture_output=True,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -413,7 +422,7 @@ class WorkflowTests(unittest.TestCase):
         mif = self.folder / "wm.mif"
         subprocess.run(["mrconvert", str(self.fod), str(mif), "-quiet"], check=True)
         self.fod.unlink()
-        result = self.cli("dry-run", str(self.folder))
+        result = self.cli("--dry-run", "--input", str(self.folder))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         commands = [shlex.split(line[2:]) for line in result.stdout.splitlines() if line.startswith("+ ")]
         registration = next(cmd for cmd in commands if "atlas-to-subject" in cmd)
@@ -425,16 +434,16 @@ class WorkflowTests(unittest.TestCase):
 
     def test_tracking_uses_only_the_bundle_mask(self) -> None:
         self.save("mask.nii.gz", np.ones((4, 5, 6)))
-        result = self.cli("dry-run", str(self.folder))
+        result = self.cli("--dry-run", "--input", str(self.folder))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         commands = [shlex.split(line[2:]) for line in result.stdout.splitlines() if line.startswith("+ tckgen ")]
-        self.assertEqual(len(commands), 6)
+        self.assertEqual(len(commands), 2)
         for command in commands:
             self.assertEqual(command.count("-mask"), 1, "Multiple MRtrix masks form a UNION.")
             self.assertIn("bundle_segmentations", command[command.index("-mask") + 1])
 
     def test_pipeline_requires_opposite_end_regions(self) -> None:
-        result = self.cli("dry-run", str(self.folder))
+        result = self.cli("--dry-run", "--input", str(self.folder))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         commands = [shlex.split(line[2:]) for line in result.stdout.splitlines() if line.startswith("+ ")]
         generators = [cmd for cmd in commands if cmd[0] == "tckgen"]
@@ -446,30 +455,23 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(len(filters), len(generators))
         for cmd in filters:
             self.assertIn("--endings", cmd)
-        simple = (ROOT / "fat_simple.sh").read_text().split("# Embedded Python helper.", 1)[0]
-        generators = [shlex.split(line.strip()) for line in simple.splitlines() if line.strip().startswith("tckgen ")]
-        self.assertEqual(len(generators), 6)
-        for cmd in generators:
-            self.assertEqual(cmd.count("-include"), 2)
-            self.assertEqual(cmd.count("-mask"), 1)
-            self.assertNotIn("-seed_unidirectional", cmd)
-            self.assertNotIn("-stop", cmd)
 
     def test_bad_tracking_parameters_rejected(self) -> None:
-        result = self.cli("check", str(self.folder), MIN_LENGTH="200", MAX_LENGTH="100")
+        result = self.cli("--check", "--input", str(self.folder), "--min-length", "200", "--max-length", "100")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("MIN_LENGTH", result.stderr)
+        self.assertIn("--min-length", result.stderr)
 
-    def test_batch_output_override_rejected(self) -> None:
-        result = self.cli("check", str(self.folder), str(self.folder), OUTPUT_DIR=str(self.folder / "out"))
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("one input directory", result.stderr)
+    def test_unknown_option_and_missing_value_rejected(self) -> None:
+        for args in (("--algorithm", "unknown"), ("--input",), ("--unused",)):
+            result = self.cli(*args)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("ERROR", result.stderr)
 
-    def test_simple_script_works_without_external_helper(self) -> None:
+    def test_standalone_script_works_without_external_helper(self) -> None:
         standalone = self.folder / "standalone"
         standalone.mkdir()
-        script = standalone / "fat_simple.sh"
-        shutil.copyfile(ROOT / "fat_simple.sh", script)
+        script = standalone / "fat.sh"
+        shutil.copyfile(ROOT / "fat.sh", script)
         environment = os.environ.copy()
         environment.update(IN=str(self.folder), OUT=str(standalone / "output"))
         result = subprocess.run(
@@ -495,14 +497,80 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         qc.check_tracks(destination, 1, mask)
 
-    def test_embedded_helper_matches_the_verified_module(self) -> None:
-        script = (ROOT / "fat_simple.sh").read_text()
-        embedded = script.split("<<'FAT_QC_PY'\n", 1)[1].split("\nFAT_QC_PY\n", 1)[0]
-        self.assertEqual(embedded, (ROOT / "scripts/fat_qc.py").read_text().rstrip("\n"))
+    def test_default_runs_only_ifod2(self) -> None:
+        result = self.cli("--dry-run", "--input", str(self.folder))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        commands = [shlex.split(line[2:]) for line in result.stdout.splitlines() if line.startswith("+ ")]
+        tracking = [c for c in commands if c[0] == "tckgen"]
+        self.assertEqual(len(tracking), 2)
+        for c in tracking:
+            self.assertEqual(c[c.index("-algorithm") + 1], "iFOD2")
+            self.assertEqual(c[c.index("-select") + 1], "4000")
+            self.assertEqual(c[c.index("-cutoff") + 1], "0.05")
+        for c in (c for c in commands if "filter-tracks" in c):
+            self.assertEqual(c[c.index("--endings") - 1], "2000")
+        self.assertFalse(any(c[0] == "sh2peaks" for c in commands))
+
+    def test_selected_algorithms_and_parameters_reach_tracking(self) -> None:
+        result = self.cli("--dry-run", "--input", str(self.folder), "--algorithm", "SD_STREAM,FACT",
+                          "--streamlines", "57", "--candidates", "200", "--cutoff", "0.08",
+                          "--threads", "2", "--max-seeds", "10000", "--min-length", "25",
+                          "--max-length", "120", "--mask-threshold", "0.08", "--mask-margin", "2",
+                          "--roi-margin", "4")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        commands = [shlex.split(line[2:]) for line in result.stdout.splitlines() if line.startswith("+ ")]
+        tracking = [c for c in commands if c[0] == "tckgen"]
+        self.assertEqual(len(tracking), 4)
+        self.assertEqual({c[c.index("-algorithm") + 1] for c in tracking}, {"SD_STREAM", "FACT"})
+        for c in tracking:
+            for flag, value in (("-cutoff", "0.08"), ("-select", "200"), ("-nthreads", "2"),
+                                ("-seeds", "10000"), ("-minlength", "25"), ("-maxlength", "120")):
+                self.assertEqual(c[c.index(flag) + 1], value)
+        for c in commands:
+            if "filter-tracks" in c:
+                self.assertEqual(c[c.index("--endings") - 1], "57")
+            elif "probability-bundle" in c:
+                self.assertEqual(c[c.index("--threshold") + 1], "0.08")
+                self.assertEqual(c[c.index("--margin") + 1], "2")
+            elif "endings" in c:
+                self.assertEqual(c[c.index("--radius") + 1], "4")
+
+    def test_installed_atlas_check_is_read_only_and_offline(self) -> None:
+        before = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in self.atlas.iterdir()}
+        with patch.object(qc.subprocess, "run", side_effect=AssertionError("unexpected external command")):
+            qc.installed_atlas(self.atlas)
+        after = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in self.atlas.iterdir()}
+        self.assertEqual(before, after)
+        result = self.cli("--check", "--input", str(self.folder))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(before, {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in self.atlas.iterdir()})
+
+    def test_missing_atlas_stops_before_output_creation(self) -> None:
+        absent = self.folder / "absent atlas"
+        result = self.cli("--input", str(self.folder), "--atlas-dir", str(absent))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--setup-atlas", result.stderr)
+        self.assertFalse(absent.exists())
+        self.assertFalse((self.folder / "fat_output").exists())
+
+    def test_corrupt_installed_atlas_is_rejected_without_repair(self) -> None:
+        path = self.atlas / qc.ATLAS_FILES[0]
+        path.write_bytes(b"damaged")
+        with patch.object(qc.subprocess, "run", side_effect=AssertionError("unexpected download")):
+            with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                qc.installed_atlas(self.atlas)
+        self.assertEqual(path.read_bytes(), b"damaged")
+
+    def test_invalid_mask_options_rejected_before_output_creation(self) -> None:
+        for flag, value in (("--mask-threshold", "nan"), ("--mask-margin", "-1"),
+                            ("--roi-margin", "inf"), ("--candidates", "1"), ("--tensor-fa", "2")):
+            result = self.cli("--input", str(self.folder), flag, value)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((self.folder / "fat_output").exists())
 
     def test_standalone_cli_derives_and_checks_end_regions(self) -> None:
-        script = self.folder / "fat_simple.sh"
-        shutil.copyfile(ROOT / "fat_simple.sh", script)
+        script = self.folder / "fat.sh"
+        shutil.copyfile(ROOT / "fat.sh", script)
         mask = self.save("long_mask.nii.gz", np.ones((3, 3, 20)))
         labels = np.zeros((3, 3, 20))
         labels[:, :, :3] = 1

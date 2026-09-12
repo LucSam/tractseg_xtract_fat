@@ -1,42 +1,33 @@
 # Frontal Aslant Tract reconstruction
 
-**Workflow author: Lucius Fekonja** · [GitHub: LucSam](https://github.com/LucSam)
+Author: **Lucius Fekonja** · [LucSam on GitHub](https://github.com/LucSam)
 
-Reconstruct the Frontal Aslant Tract (FAT) from individual white-matter FODs
-and a brain-extracted T1, using HCP1065 atlas masks and anatomical cortical targets.
-Each successful reconstruction contains **2000 complete streamlines per side**,
-inside the processed bundle mask.
+Reconstruct the frontal aslant tract (FAT) from individual white-matter FODs
+and a brain-extracted T1, using HCP1065 atlas masks and cortical target regions.
+`fat.sh` runs iFOD2 with 2000 streamlines per side by default. Tracking algorithms,
+streamline counts and mask settings are selectable through command-line options.
 
-[![FAT in direction RGB — open the interactive 3D viewer](assets/fat_3d.png)](https://LucSam.github.io/tractseg_xtract_fat/)
+[![FAT in direction RGB — open the 3D viewer](assets/fat_3d.png)](https://lucsam.github.io/tractseg_xtract_fat/)
 
-[**Open the 3D viewer**](https://LucSam.github.io/tractseg_xtract_fat/) · Rotate, zoom,
-and compare iFOD2, SD_STREAM, FACT, Tensor_Det and Tensor_Prob.
-
-`fat_simple.sh` is a standalone script with its preparation and validation code
-embedded. The atlas downloads automatically on first use. The current workflow
-uses HCP1065; the repository retains its original name.
+[Open the 3D viewer](https://lucsam.github.io/tractseg_xtract_fat/) to rotate the
+tracts and select iFOD2, SD_STREAM, FACT, Tensor_Det or Tensor_Prob.
 
 ## Table of contents
 
 - [Install](#install)
 - [How to use](#how-to-use)
-- [Tracking algorithms](#tracking-algorithms)
+- [Options](#options)
 - [FAQ](#faq)
-- [Method and scope](#method-and-scope)
-- [Advanced options](METHODS.md)
-- [Validation](VALIDATION.md)
-- [Attribution and references](#attribution)
+- [Method](METHODS.md)
+- [References](#attribution)
 
 ## Install
 
-Use a **Bash or Zsh terminal on macOS or Linux**. The Linux installation route
-below is for x86_64. On Windows, first set up
-[WSL with Ubuntu](https://fsl.fmrib.ox.ac.uk/fsl/docs/install/windows.html), then use
-its Linux terminal. The workflow has been exercised locally on macOS; the
-instructions for other systems follow the upstream projects' installation guides.
-
-Run one code block at a time. Skip installation steps for software you already
-have. Steps 1–5 are one-time setup; repeat steps 6–8 for another subject.
+Use a Bash or Zsh terminal on macOS or Linux. On Windows, use
+[WSL with Ubuntu](https://fsl.fmrib.ox.ac.uk/fsl/docs/install/windows.html).
+Run one block at a time and skip software installation steps you have already
+completed. The prerequisites are Python with NumPy, NiBabel and SciPy, ANTs,
+MRtrix3, FSL's Harvard-Oxford atlas, and the atlas files prepared in step 6.
 
 ### 1. Install Conda if needed
 
@@ -145,7 +136,7 @@ source "$HOME/miniforge3/etc/profile.d/conda.sh"
 With an existing Miniconda/Anaconda installation, use its shell setup instead.
 There is no need to reinstall the packages for another subject.
 
-### 5. Download this workflow and check dependencies
+### 5. Download the workflow
 
 ```bash
 mkdir -p "$HOME/code"
@@ -154,266 +145,209 @@ git clone https://github.com/LucSam/tractseg_xtract_fat.git
 cd tractseg_xtract_fat
 ```
 
-If you already cloned it, enter the existing folder and run `git pull --ff-only`.
-Then check the installation before starting a reconstruction:
+For an existing clone, run `git pull --ff-only` from its directory.
+`fat.sh` contains the complete workflow and can also be shared as a single file.
+
+### 6. Install the FAT atlas and template
+
+Run this once, with an internet connection:
 
 ```bash
-python3 - <<'PY'
-import os
-import shutil
-from pathlib import Path
-import nibabel
-import numpy
-import scipy
-
-commands = ["bash", "curl", "mrinfo", "mrconvert", "sh2peaks", "tckgen", "tckinfo",
-            "antsRegistration", "antsRegistrationSyNQuick.sh", "antsApplyTransforms"]
-missing = [name for name in commands if shutil.which(name) is None]
-assert not missing, "Commands missing from PATH: " + ", ".join(missing)
-assert os.environ.get("FSLDIR"), "Set FSLDIR in step 4."
-fsl = Path(os.environ["FSLDIR"])
-for relative in ["data/atlases/HarvardOxford-Cortical.xml",
-                 "data/atlases/HarvardOxford/HarvardOxford-cort-maxprob-thr25-1mm.nii.gz",
-                 "data/standard/MNI152_T1_1mm_brain.nii.gz"]:
-    assert (fsl / relative).is_file(), f"Missing FSL file: {fsl / relative}"
-print("Dependencies and FSL atlas files OK.")
-print(f"NumPy {numpy.__version__}; NiBabel {nibabel.__version__}; SciPy {scipy.__version__}")
-PY
+bash fat.sh --setup-atlas
 ```
 
-Continue after `Dependencies and FSL atlas files OK.` No HCP atlas files are
-needed at this point; they are downloaded in step 7.
+This installation command downloads the HCP1065 probability archive and
+ICBM2009a template archive (about 77 MB), verifies their SHA-256 checksums,
+and prepares the FAT maps and brain template in
+`~/.cache/tractseg_xtract_fat/hcp1065`.
+
+For a shared installation or another location:
+
+```bash
+bash fat.sh --setup-atlas --atlas-dir /absolute/path/to/atlases/hcp1065
+```
+
+Pass the same `--atlas-dir` to subsequent commands. Tracking checks the installed
+files and their checksums before starting; it runs offline and leaves the atlas
+installation unchanged. Harvard-Oxford and its MNI152 template come from FSL
+in step 4.
 
 ## How to use
 
-### 6. Prepare your input folder
+### 7. Prepare the inputs and check the installation
 
-The required files are:
+Use FODs from your diffusion preprocessing pipeline and a brain-extracted T1
+from the same individual:
 
 ```text
 subject01/mri/
   wm.nii.gz          # MRtrix white-matter FOD spherical-harmonic coefficients
-  t1_brain.nii.gz    # brain-extracted T1 from the same individual
+  t1_brain.nii.gz    # brain-extracted T1
 ```
 
-**`wm.nii.gz` must contain FOD coefficients, not a binary white-matter mask.**
-Start from your existing diffusion preprocessing/FOD pipeline. This workflow
-does not estimate FODs from raw DWI or perform skull stripping. If your FOD is
-already `wm.mif`, convert it once:
+`wm.mif` is also accepted. T1 and FOD images can have different grids; the
+workflow registers them. FACT uses `peaks.nii.gz` if present, otherwise it
+computes three peaks from the FODs.
+
+Set the input path, then check prerequisites and image dimensions:
 
 ```bash
-mrconvert /absolute/path/to/wm.mif /absolute/path/to/subject01/mri/wm.nii.gz
+IN="/absolute/path/to/subject01/mri"
+bash fat.sh --input "$IN" --check
 ```
 
-Place the brain-extracted T1 in that same folder as `t1_brain.nii.gz`. T1 and FOD
-images can have different grids: the workflow registers them. Peaks and a
-separate binary WM mask are not required by `fat_simple.sh`.
+Continue after `Prerequisites and inputs OK.`
 
-**Edit this path to your own input folder**, then check its dimensions and files:
+### 8. Run iFOD2
 
 ```bash
-export IN="/absolute/path/to/subject01/mri"
-bash tractseg_xtract_fat.sh check "$IN"
-mrinfo "$IN/t1_brain.nii.gz" -size
+OUT="$IN/fat_output"
+bash fat.sh --input "$IN" --output "$OUT" > "$IN/fat_run.log" 2>&1
 ```
 
-Expect `Input dimensions and grids OK.` and three dimensions for the T1.
+Use a new output directory for each run. Progress and errors are written to
+`fat_run.log`. The script estimates the registration transforms, prepares the
+masks, and tracks 2000 streamlines for each side.
 
-### 7. Run the reconstruction
-
-From the repository directory:
-
-```bash
-export OUT="$IN/fat_output"
-export ATLAS_DIR="$HOME/.cache/tractseg_xtract_fat/hcp1065"
-IN="$IN" OUT="$OUT" ATLAS_DIR="$ATLAS_DIR" bash fat_simple.sh > "$IN/fat_run.log" 2>&1
-```
-
-`OUT` must be a new directory. This runs iFOD2, SD_STREAM and FACT for each side. Progress and errors are written to `fat_run.log`.
-In another terminal you can view progress with
-`tail -f /absolute/path/to/subject01/mri/fat_run.log`.
-
-The script downloads the
-HCP1065 probability archive and ICBM2009a template archive (about **77 MB** total),
-checks their SHA-256 hashes and extracts the two FAT maps and template files.
-The cache is shared between subjects. Further runs can use it offline. The
-Harvard-Oxford cortical atlas comes from your FSL installation in step 4.
-The script estimates this subject's registration transforms automatically.
-
-On completion, check the success marker:
+Check completion:
 
 ```bash
 if [ -f "$OUT/SUCCESS" ]; then
-  echo "All FAT reconstructions passed."
+  echo "FAT reconstruction completed."
 else
   tail -n 40 "$IN/fat_run.log"
 fi
 ```
 
-Only a run with `SUCCESS` has passed all required final checks. If a run fails,
-read its log before rerunning; use a fresh output directory after correcting the
-cause. Existing results are protected from overwriting.
+`SUCCESS` is written when every requested tract contains the selected number
+of complete streamlines within its bundle mask, with endpoints in opposite
+cortical end regions.
 
-### 8. Inspect and use the results
+### 9. Inspect the results
 
 ```bash
 tckinfo "$OUT/iFOD2_trackings/FAT_left.tck" -count
 tckinfo "$OUT/iFOD2_trackings/FAT_right.tck" -count
-tckinfo "$OUT/SD_STREAM_trackings/FAT_left.tck" -count
-tckinfo "$OUT/SD_STREAM_trackings/FAT_right.tck" -count
-tckinfo "$OUT/FACT_trackings/FAT_left.tck" -count
-tckinfo "$OUT/FACT_trackings/FAT_right.tck" -count
-```
-
-Each file should contain **2000 streamlines**. Open both iFOD2 bundles on the
-registered T1 in MRview:
-
-```bash
 mrview "$OUT/work/atlas/t1_dwi.nii.gz" \
   -tractography.load "$OUT/iFOD2_trackings/FAT_left.tck" \
   -tractography.load "$OUT/iFOD2_trackings/FAT_right.tck"
 ```
 
-Use MRview's Overlay tool to add the bundle masks and the `_b`/`_e` cortical ROIs.
-Inspect anatomical alignment and trajectories on **both** sides. For a server
-without a graphical desktop, open the output files in MRview on your workstation.
+Add the bundle masks and `_b`/`_e` cortical regions with MRview's Overlay tool
+to review registration and trajectories.
 
-| Output | Meaning |
+| Output | Contents |
 | --- | --- |
-| `iFOD2_trackings/`, `SD_STREAM_trackings/`, `FACT_trackings/` | Final TCK files |
-| `bundle_segmentations/` | Processed masks used for tracking and final containment checks |
-| `bundle_segmentations_original/` | Raw thresholded HCP1065 masks |
-| `anatomical_rois/` | Full registered IFG and SFG/SMA cortex regions |
-| `endings_segmentations/` | Cortex regions with a 3 mm margin |
-| `seed_masks/` | Endpoint regions intersected with the tracking mask |
-| `qc_summary.csv`, `roi_qc.csv`, `METHOD.txt` | Geometric checks, volumes and method |
-| `work/atlas/` | Registered probabilities, T1 and transform provenance |
-| `SUCCESS` | All requested output checks passed |
+| `iFOD2_trackings/` | `FAT_left.tck` and `FAT_right.tck`; other algorithms get their own folders |
+| `bundle_segmentations/` | Masks used for tracking and containment checks |
+| `bundle_segmentations_original/` | Thresholded HCP1065 probability maps |
+| `anatomical_rois/` | Registered IFG and SFG/SMA cortex regions |
+| `endings_segmentations/` | Cortical end regions with the selected margin |
+| `seed_masks/` | End regions intersected with the bundle mask |
+| `run.json`, `commands.log` | Effective settings and executed workflow commands |
+| `qc_summary.csv`, `roi_qc.csv` | Mask volumes, connectivity and region overlap |
+| `work/atlas/` | Registered probabilities, T1 and registration records |
+| `SUCCESS` | Completion marker |
 
-## Tracking algorithms
+## Options
 
-All methods use the same registered bundle masks, cortical targets and final
-whole-streamline checks. The [3D viewer](https://LucSam.github.io/tractseg_xtract_fat/)
-shows a fixed subset of 500 of 2000 streamlines per side from the local example.
-Red/green/blue encode left–right/anterior–posterior/inferior–superior direction.
+### Select a tracking algorithm
 
-| Method | Tracking input | Available through |
+```bash
+bash fat.sh --input "$IN" --output "$IN/fat_sd_stream" --algorithm SD_STREAM
+```
+
+Select several algorithms with a comma-separated list:
+
+```bash
+bash fat.sh --input "$IN" --output "$IN/fat_algorithms" --algorithm iFOD2,SD_STREAM,FACT
+```
+
+| Algorithm | Input | Tracking |
 | --- | --- | --- |
-| iFOD2 | FODs; probabilistic | `fat_simple.sh` and extended script |
-| SD_STREAM | FODs; deterministic | `fat_simple.sh` and extended script |
-| FACT | Three FOD peaks; deterministic | `fat_simple.sh` and extended script |
-| Tensor_Det | DWI with gradients; deterministic tensor tracking | Extended script |
-| Tensor_Prob | DWI with gradients; residual-bootstrap tensor tracking | Extended script |
-| Trekker / PTT | FODs; probabilistic parallel transport tracking | Not included; see [FAQ](#what-about-trekker) |
-| TractSeg probabilistic TOM tracking | A tract-specific orientation map (TOM) | Unavailable for FAT in this workflow |
+| `iFOD2` (default) | FODs | Probabilistic |
+| `SD_STREAM` | FODs | Deterministic |
+| `FACT` | Three FOD peaks | Deterministic |
+| `Tensor_Det` | DWI with gradients | Deterministic tensor |
+| `Tensor_Prob` | DWI with gradients | Residual-bootstrap tensor |
 
-The default standalone script runs iFOD2, SD_STREAM and FACT. Select methods in
-the extended script, which requires the cloned repository:
-
-```bash
-ALGORITHMS="iFOD2 SD_STREAM FACT" \
-OUTPUT_DIR="$IN/fat_comparison" \
-bash tractseg_xtract_fat.sh run "$IN"
-```
-
-**Tensor tracking:** provide a preprocessed DWI `.mif` with its embedded gradient
-table in the same grid as the FODs. A fitted tensor image or FOD image is not a
-DWI input. The script selects b=0 plus the lowest nonzero shell and uses an FA
-cutoff of 0.1. It generates 8000 candidates per side to retain 2000 valid tracks.
+For tensor tracking, supply a preprocessed DWI `.mif` containing its gradient
+table, in the same grid as the FODs. The workflow selects b=0 and the lowest
+nonzero shell:
 
 ```bash
-DWI="/absolute/path/to/dwi_den_unr_pre_unbia.mif" \
-ALGORITHMS="Tensor_Det Tensor_Prob" \
-OUTPUT_DIR="$IN/fat_tensor" \
-bash tractseg_xtract_fat.sh run "$IN"
+bash fat.sh --input "$IN" --output "$IN/fat_tensor" \
+  --algorithm Tensor_Det,Tensor_Prob \
+  --dwi /absolute/path/to/dwi_den_unr_pre_unbia.mif
 ```
 
-You can combine all five supported methods in `ALGORITHMS`. Tensor modes still
-require `DWI`. Each run needs a new output directory. FOD/peak and tensor cutoffs
-measure different quantities; algorithm comparisons are not a validation of
-anatomical completeness.
-[MRtrix algorithms](https://mrtrix.readthedocs.io/en/latest/reference/commands/tckgen.html).
+### Set tracking and mask parameters
+
+```bash
+bash fat.sh --input "$IN" --output "$IN/fat_5000" \
+  --streamlines 5000 --cutoff 0.1 --threads 8
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--streamlines` | `2000` | Final streamlines per side and algorithm |
+| `--cutoff` | `0.05` | FOD/peak amplitude cutoff |
+| `--tensor-fa` | `0.1` | FA cutoff for tensor tracking |
+| `--min-length` | `20` | Minimum streamline length, mm |
+| `--max-length` | `150` | Maximum streamline length, mm |
+| `--threads` | `4` | CPU threads |
+| `--max-seeds` | `2000000` | Maximum seed attempts per side and algorithm |
+| `--candidates` | Twice the target; four times for tensors | Candidate tracks before containment and endpoint checks |
+| `--mask-threshold` | `0.05` | HCP1065 probability threshold |
+| `--mask-margin` | `3` | Bundle mask margin, mm |
+| `--roi-margin` | `3` | Cortical end-region margin, mm |
+
+Show all options or preview the commands:
+
+```bash
+bash fat.sh --help
+bash fat.sh --input "$IN" --output "$IN/fat_preview" --dry-run
+```
+
+Registration transform reuse is described in [METHODS.md](METHODS.md).
 
 ## FAQ
 
-### Why not the TractSeg tracking algorithm?
+### Can I use the atlas on a computer without internet access?
 
-TractSeg's own probabilistic tracker follows a learned, tract-specific orientation
-map (TOM). Its XTRACT model does not supply a FAT TOM. The HCP1065 probability mask
-used here supplies spatial coverage, not fibre orientations. Calling a generic
-FOD tracker “TractSeg” would therefore be misleading. This workflow supports
-TractSeg's MRtrix tracking alternatives, including FACT, SD_STREAM and iFOD2.
-[TractSeg implementation](https://github.com/MIC-DKFZ/TractSeg/blob/master/tractseg/libs/tracking.py).
+Run step 6 on a connected computer, copy the resulting atlas directory to the
+other computer, and pass its location with `--atlas-dir`.
 
-### What about Trekker?
+### How do I run several subjects?
 
-Baran Aydogan's [Trekker](https://dmritrekker.github.io/) implements probabilistic
-parallel transport tractography (PTT). A local rc6 pilot ran with the FAT masks,
-but yielded too few candidate connections during the short trial to establish
-a verified 2000-streamline result. It was stopped; this is not evidence that PTT
-cannot reconstruct the FAT. Trekker is not yet integrated into the released
-workflow or viewer.
+```bash
+for IN in /data/subject*/mri; do
+  bash fat.sh --input "$IN" --output "$IN/fat_output" > "$IN/fat_run.log" 2>&1 || break
+done
+```
 
-### Do I need to train a model?
+### A run stopped. What should I check?
 
-No. Atlas maps are registered to each individual's anatomy; tracking then uses
-that individual's diffusion data. There is no model training step.
-
-### Can the viewer run directly in the README?
-
-GitHub does not execute JavaScript in README files. The single preview links to
-the interactive viewer on GitHub Pages. [GitHub markup](https://github.com/github/markup).
-
-### Troubleshooting
-
-
-| Message / situation | Next step |
+| Message | Action |
 | --- | --- |
-| `conda: command not found` | Source the Conda shell setup from step 1 or 4. |
-| Missing `numpy`, `nibabel`, `scipy` or ANTs command | Run `conda activate fat`; repeat the dependency check in step 5. |
-| Missing MRtrix command | Complete step 3 and check `command -v mrinfo`. |
-| Missing `FSLDIR` or Harvard-Oxford files | Use your actual FSL directory in step 4; a minimal FSL installation might lack atlas data. |
-| Atlas download / connection error | Check access to GitHub and McGill from your network. Rerun with a new `OUT` after connectivity is restored; the cache is reused. |
-| `Atlas cache checksum mismatch` | Remove only the archive named in the error from `ATLAS_DIR`, then rerun into a new `OUT`; it will be downloaded again. |
-| `Output already exists` | Keep the existing result and choose e.g. `OUT="$IN/fat_output_02"`. |
-| FOD shape / grid error | Supply MRtrix SH FOD coefficients from the correct individual; a WM mask or scalar image is not a FOD. |
-| Too few valid streamlines / disconnected mask / missing ROI overlap | Inspect registration, probabilities, bundle masks and cortical ROIs. The script stops instead of presenting a partial result as successful. |
-
-## Method and scope
-
-The workflow uses a **5% HCP1065 probability threshold**, the dominant connected
-component and a **bounded 3 mm bundle margin**, with light mask smoothing. The
-cortical targets are Harvard-Oxford IFG pars opercularis/triangularis and SFG plus
-SMA, each with a 3 mm margin. HCP1065 and Harvard-Oxford use different template
-spaces, which are registered separately. Tracking follows the individual's FODs.
-
-The 2000-streamline target and cutoff 0.05 follow
-[TractSeg's FOD tracking defaults](https://github.com/MIC-DKFZ/TractSeg/blob/master/tractseg/libs/tracking.py).
-This implementation does not use a TractSeg model or learned FAT TOMs. Every
-saved streamline is checked along its entire polyline and must connect opposite
-expanded end regions. No clipping, joining or duplication is used.
-
-A passing run establishes these geometric conditions, not anatomical completeness.
-The tested example gained mostly posterior width; its most anterior manual FAT
-extensions remain partly outside the atlas mask. Registration near pathology and
-results in other individuals require review. See [VALIDATION.md](VALIDATION.md)
-for the measurements and [METHODS.md](METHODS.md) for detailed processing,
-transform reuse, batch mode, optional FACT and FA outputs.
+| Missing command or Python package | Activate the `fat` environment and check the relevant installation step. |
+| Missing FSL file | Set `FSLDIR` or `--fsl-dir` to the installation containing Harvard-Oxford and MNI152. |
+| Atlas is not installed | Complete step 6 using the same atlas directory. |
+| Atlas file missing or checksum mismatch | Repeat `--setup-atlas` to restore the extracted files. |
+| Atlas cache checksum mismatch | Remove the archive named in the error, then repeat `--setup-atlas`. |
+| Output already exists | Choose a new `--output` directory. |
+| Too few valid streamlines | Review the registration, bundle mask and end regions; `--candidates` and `--max-seeds` control the tracking budget. |
+| Disconnected mask or missing ROI overlap | Inspect the registered probability map and cortical regions in MRview. |
 
 ## Development checks
 
-These tools are optional for running the reconstruction:
-
 ```bash
 conda install -n fat --override-channels -c conda-forge shellcheck ruff mypy
-# Only needed when rebuilding the website from local TCK results:
-# conda install -n fat --override-channels -c conda-forge plotly scikit-image
 bash tests/verify.sh
 ```
 
-The suite runs 41 regression tests, ShellCheck, Ruff and mypy. Synthetic tests
-cover geometry, atlas handling, endpoint constraints and complete-polyline mask
-containment. Real MRI results are reported separately in [VALIDATION.md](VALIDATION.md).
+The checks cover image geometry, atlas integrity, command-line options, mask
+containment and endpoint connections, followed by ShellCheck, Ruff and mypy.
 
 ## Attribution
 
@@ -431,8 +365,3 @@ respective authors. Please cite the components used:
 - Harvard-Oxford contributors: [FSL atlas documentation](https://fsl.fmrib.ox.ac.uk/fsl/docs/other/datasets.html).
 - Tournier et al. (2019), [MRtrix3](https://doi.org/10.1016/j.neuroimage.2019.116137);
   [ANTs registration](https://github.com/ANTsX/ANTs).
-
-The earlier implementation used [TractSeg](https://github.com/MIC-DKFZ/TractSeg)
-with [XTRACT definitions](https://fsl.fmrib.ox.ac.uk/fsl/docs/diffusion/xtract.html).
-Those predictions remain useful comparators, but are no longer the default hard
-bundle boundary. No BEDPOSTX or PROBTRACKX run is required by this workflow.

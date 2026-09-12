@@ -1,153 +1,90 @@
-# Method and advanced usage
+# Method
 
-**Workflow author: Lucius Fekonja**
+Author: Lucius Fekonja · [Usage and installation](README.md)
 
-For installation and your first reconstruction, start with the [README tutorial](README.md#install).
-See [VALIDATION.md](VALIDATION.md) for measured results and limitations.
+## Atlas preparation
+
+`bash fat.sh --setup-atlas` installs HCP1065 FAT probability maps and the
+ICBM2009a asymmetric T1 template. Archive downloads have pinned SHA-256 checksums.
+The installation records checksums for the extracted FAT maps, brain template
+and template license. Each tracking run verifies these installed resources.
+
+## Registration
+
+ANTs registers the individual's brain-extracted T1 to ICBM2009a for the HCP1065
+maps and separately to FSL MNI152 for the Harvard-Oxford cortical labels. A rigid
+T1-to-diffusion registration completes the mapping into the FOD grid.
+
+Atlas-to-diffusion transforms are applied in this order: inverse nonlinear
+T1-to-template warp, inverse T1-to-template affine, then T1-to-diffusion affine.
+Probability maps use linear interpolation; cortical labels use nearest-neighbour
+interpolation. `work/atlas/registration.json` records the transform paths and
+ANTs commands. `work/atlas/t1_dwi.nii.gz` provides the T1 in diffusion space for
+inspection.
+
+To reuse transforms from the same subject and image spaces:
+
+```bash
+bash fat.sh --input /data/subject01/mri --output /data/subject01/fat_reuse \
+  --t1-to-mni-prefix /data/subject01/transforms/T1toMNI_ \
+  --t1-to-icbm-prefix /data/subject01/transforms/T1toICBM2009a_ \
+  --t1-to-dwi-affine /data/subject01/transforms/T1toDWI_0GenericAffine.mat
+```
+
+Each template prefix must provide `0GenericAffine.mat` and
+`1InverseWarp.nii.gz`. The two template registrations have separate prefixes.
 
 ## Bundle masks
 
-The [HCP1065 population-probability atlas](https://brain.labsolver.org/hcp_trk_atlas.html)
-provides left and right FAT maps in **ICBM2009a nonlinear asymmetric space**.
-The workflow registers the matching brain-extracted T1 template to the individual
-via the inverse of a subject-T1-to-template registration, then applies the
-subject's T1-to-DWI rigid transform. Probabilities use linear interpolation.
-The previous XTRACT mask is not intersected with this new prior.
+The default HCP1065 probability threshold is 0.05 (`--mask-threshold`).
+Thresholded maps are saved in `bundle_segmentations_original/`.
 
-In diffusion space, the workflow:
+The largest face-connected component must contain at least 95% of thresholded
+voxels. It is expanded by a physical distance of 3 mm (`--mask-margin`), smoothed
+with a 1 mm Gaussian sigma and thresholded at 0.5. The retained component is
+preserved, and cavity filling is bounded by the selected margin. The resulting
+tracking mask must be face-connected and is saved in `bundle_segmentations/`.
 
-1. Saves the unthresholded probabilities in `work/atlas/`.
-2. Thresholds at **0.05**, saving all threshold voxels in `bundle_segmentations_original/`.
-3. Keeps the largest face-connected component only if it contains at least **95%**
-   of those voxels. Removed islands are recorded; larger disconnections fail.
-4. Adds a bounded **3 mm physical margin**, smooths with Gaussian **sigma 1 mm**
-   and thresholds at 0.5. The retained original component is preserved. Enclosed
-   cavity filling is limited to that distance bound.
-5. Requires a face-connected result and saves it in `bundle_segmentations/`.
+## Cortical regions
 
-The 5% threshold and 3 mm registration margin are explicit workflow settings,
-**not validated anatomical FAT boundaries**. The wider atlas prior allows more
-candidate trajectories. It does not guarantee all anterior extensions found by a
-broader manual or extended-FAT protocol. See [VALIDATION.md](VALIDATION.md).
+The Harvard-Oxford maximum-probability cortical atlas (25% threshold, 1 mm)
+defines two targets in each hemisphere:
 
-## Cortical targets and registration
+- `_b`: inferior frontal gyrus, pars opercularis and pars triangularis.
+- `_e`: superior frontal gyrus and juxtapositional lobule cortex (SMA).
 
-The FSL Harvard-Oxford cortical max-probability atlas at 25% supplies:
+The registered regions are saved in `anatomical_rois/`. A default 3 mm expansion
+(`--roi-margin`) produces `endings_segmentations/`. Their intersections with the
+bundle mask are saved in `seed_masks/`. Both regions must reach the bundle mask,
+and their intersections within it must be separate.
 
-| Region | Definition |
-| --- | --- |
-| `_b` | Inferior frontal gyrus: pars opercularis + pars triangularis |
-| `_e` | Superior frontal gyrus + juxtapositional lobule cortex (SMA) |
+## Tracking
 
-Each region is split by hemisphere in atlas world coordinates and transformed
-with nearest-neighbour interpolation. SFG includes medial and dorsal portions;
-it is not restricted to the former medial BA6 strip. These are population
-anatomical labels, not individual functional boundaries or learned FAT endings.
-The definition is not an exact reproduction of the custom parcels in
-[Tagliaferri et al. (2024)](https://doi.org/10.1007/s00429-024-02778-4).
+The default algorithm is MRtrix3 iFOD2. SD_STREAM, FACT, Tensor_Det and Tensor_Prob
+are selected with `--algorithm`. FACT uses three FOD peaks. Tensor methods use
+b=0 and the lowest nonzero DWI shell, with an FA cutoff of 0.1 (`--tensor-fa`).
+The FOD/peak amplitude cutoff defaults to 0.05 (`--cutoff`).
 
-**Two distinct template registrations are necessary:** Harvard-Oxford uses FSL
-MNI152; HCP1065 uses ICBM2009a. Their inverse warps are not interchangeable.
-Both are composed with the same T1-to-DWI rigid transform, using FOD coefficient
-zero as the diffusion reference. Inspect `work/atlas/t1_dwi.nii.gz`, the cortical
-labels and the bundle probabilities against the subject's anatomy.
-[HCP template coordinate systems](https://brain.labsolver.org/hcp_template.html)
+Tracking is seeded in the `_b` intersection, propagates in both directions from
+the seed and requires passage through both end regions. The processed bundle
+mask constrains propagation. Streamline lengths default to 20–150 mm
+(`--min-length`, `--max-length`).
 
-Outputs preserve full cortex labels in `anatomical_rois/`, cortex plus a **3 mm
-margin** in `endings_segmentations/`, and their intersections with the bundle in
-`seed_masks/`. The first and last streamline points must occupy opposite expanded
-regions. This does not establish termination inside cortical grey matter itself.
+The final target is 2000 streamlines per side and algorithm (`--streamlines`).
+The candidate budget is twice this count for iFOD2, SD_STREAM and FACT, and four
+times for tensor tracking; `--candidates` sets an explicit count. Every retained
+streamline must remain inside the bundle mask along all vertices and connecting
+segments, and its two endpoints must lie in opposite end regions.
 
-Optional transform reuse, **only for the same subject and the correct templates**:
+`run.json` records the chosen settings. `commands.log` records the workflow
+commands; `work/atlas/registration.json` records the ANTs commands.
+`SUCCESS` marks completion of all requested reconstructions and checks.
 
-```bash
-T1_TO_ICBM_PREFIX=/data/subject01/reg/T1toICBM2009a_ \
-T1_TO_MNI_PREFIX=/data/subject01/reg/T1toFSLMNI_ \
-T1_TO_DWI_AFFINE=/data/subject01/reg/T1toDWI_0GenericAffine.mat \
-IN=/data/subject01/mri OUT=/data/subject01/fat_output bash fat_simple.sh
-```
+## References
 
-Each nonlinear prefix supplies `0GenericAffine.mat` and `1InverseWarp.nii.gz`.
-Omit these variables to estimate transforms automatically. File existence alone
-does not establish their provenance; `work/atlas/registration.json` records the
-files and actual commands used.
-
-## Tracking and checks
-
-The standalone script runs **iFOD2, SD_STREAM and FACT**. It seeds the
-inferior-frontal ROI/bundle intersection, grows in both directions and requires
-both cortical inclusion regions. It uses **one** processed bundle `-mask`.
-There is no early ROI stopping. Defaults: 20–150 mm, cutoff 0.05, 4000 candidates,
-2,000,000 maximum seed attempts, `-downsample 1`, four threads.
-
-A final filter retains exactly **2000 whole streamlines** whose first/last points
-occupy opposite expanded cortical regions and whose complete polylines remain
-inside the mask. It checks every crossed voxel, including short corner crossings.
-There is no clipping, joining, duplication or streamline smoothing. A shortfall
-raises an error. `SUCCESS` appears only after every requested output passes.
-Partial work may remain after failure; inspect the error and choose a fresh output
-folder for another run.
-
-The 2000-streamline target and cutoff 0.05 follow TractSeg's FOD tracking defaults;
-this is still an atlas-guided MRtrix workflow, not TractSeg TOM tracking.
-[TractSeg tracking implementation](https://github.com/MIC-DKFZ/TractSeg/blob/master/tractseg/libs/tracking.py),
-[MRtrix tckgen](https://mrtrix.readthedocs.io/en/latest/reference/commands/tckgen.html)
-
-```text
-fat_output/
-  bundle_segmentations_original/FAT_{left,right}.nii.gz
-  bundle_segmentations/FAT_{left,right}.nii.gz
-  bundle_segmentations/FAT_{left,right}.json
-  anatomical_rois/FAT_{left,right}_{b,e}.nii.gz
-  endings_segmentations/FAT_{left,right}_{b,e}.nii.gz
-  seed_masks/FAT_{left,right}_{b,e}.nii.gz
-  iFOD2_trackings/FAT_{left,right}.tck
-  SD_STREAM_trackings/FAT_{left,right}.tck
-  FACT_trackings/FAT_{left,right}.tck
-  qc_summary.csv
-  roi_qc.csv
-  METHOD.txt
-  SUCCESS
-  work/atlas/
-```
-
-The JSON/CSV files record mask processing, volumes, connectivity and ROI overlap.
-These geometric checks do not establish anatomical correctness. Registration needs
-individual review, especially with mass effect. A reconstruction failure does not
-prove anatomical tract interruption.
-
-## Extended workflow
-
-`tractseg_xtract_fat.sh` uses the same HCP1065 preparation and tracking defaults,
-with an external copy of the embedded helper. It adds batch processing, optional
-tensor tracking, track densities, mean FA and native ROI overrides. It accepts `wm.mif` and
-can generate missing peaks. This alternative requires the repository; sharing
-the standalone script remains sufficient for iFOD2/SD_STREAM/FACT.
-
-```bash
-bash tractseg_xtract_fat.sh --help
-bash tractseg_xtract_fat.sh check /data/subject01/mri
-OUTPUT_DIR="$PWD/planned_run" bash tractseg_xtract_fat.sh dry-run /data/subject01/mri
-bash tractseg_xtract_fat.sh segment /data/subject01/mri
-ALGORITHMS="iFOD2 SD_STREAM" bash tractseg_xtract_fat.sh run /data/subject*/mri
-```
-
-`segment` performs atlas registration and prepares the bundle masks; `run` adds
-endpoint masks and tracking. A failure stops the batch. `OUTPUT_DIR` is allowed
-for one input only; otherwise outputs go to `<DWI_DIR>/tractseg_xtract_fat_output`.
-
-`ROI_DIR` supplies native `fa_l/{seed,target,exclude}.nii.gz` and
-`fa_r/{seed,target,exclude}.nii.gz`; all six must match the diffusion grid. These
-override the cortical tracking constraints; atlas bundle registration still runs.
-`DENSITY=1` optionally runs TractSeg/XTRACT density prediction for comparison and
-therefore requires TractSeg/weights. It does not change the HCP1065 tracking masks.
-`COMPUTE_FA=1` fits absent FA from `dwi_den_unr_pre_unbia.mif` and a brain mask.
-Mean FA per streamline is not an anatomically corresponding along-tract profile.
-
-### Additional algorithms
-
-Tensor_Det and Tensor_Prob take DWI with embedded gradients, after extraction of
-b=0 and the lowest nonzero shell. Both use `TENSOR_FA=0.1` and generate four times
-the requested final count; other algorithms generate twice the final count.
-FACT uses cleaned three-peak images. All MRtrix modes share mask and endpoint
-checks. See the [algorithm tutorial](README.md#tracking-algorithms).
+- Yeh FC (2022). [Population-based tract-to-region connectome of the human brain and its hierarchical topology](https://doi.org/10.1038/s41467-022-32595-4).
+- [HCP1065 atlas](https://brain.labsolver.org/hcp_trk_atlas.html).
+- [ICBM2009 templates](https://www.bic.mni.mcgill.ca/ServicesAtlases/ICBM152NLin2009).
+- [FSL Harvard-Oxford atlas](https://fsl.fmrib.ox.ac.uk/fsl/docs/other/datasets.html).
+- [ANTs registration](https://github.com/ANTsX/ANTs).
+- [MRtrix3 tckgen algorithms and parameters](https://mrtrix.readthedocs.io/en/latest/reference/commands/tckgen.html).
