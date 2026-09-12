@@ -233,3 +233,15 @@ Browser checks passed for all five algorithms, displayed counts, side selection,
 brain visibility, camera retention and reset, and desktop/mobile layouts.
 The five MRtrix methods have no remaining validation failures in this example;
 Trekker and TractSeg TOM tracking remain unavailable as described above.
+
+### Stable viewer geometry
+
+The viewer uses fixed axis ranges and a manual aspect ratio of 178:210:187,
+matching the displayed extents in millimetres. Automatic data-dependent aspect
+scaling previously stretched the scene when the brain surface was hidden.
+
+`tests/viewer_geometry_check.py` checks all five algorithms, all three side
+selections, and brain off/on in Chrome. Camera parameters, axis ranges and aspect
+ratios must remain unchanged, and the physical scale must be equal along all
+three axes. This regression check passes; the existing 41 tests, ShellCheck,
+Ruff and mypy also pass.

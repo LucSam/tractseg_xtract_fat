@@ -36,11 +36,14 @@ async function showAlgorithm() {
     const layout = {
       paper_bgcolor: "black", plot_bgcolor: "black", margin: {l: 0, r: 0, t: 0, b: 0},
       showlegend: false, uirevision: "fat-camera",
-      scene: {bgcolor: "black", aspectmode: "data",
+      // Keep one physical scale for all layers: axis spans are 178, 210 and 187 mm.
+      // Plotly's "data" aspect mode changes proportions when a trace is hidden.
+      scene: {bgcolor: "black", aspectmode: "manual",
+        aspectratio: {x: 178 / 210, y: 1, z: 187 / 210},
         camera: ready ? structuredClone(viewer._fullLayout.scene.camera) : frontCamera(),
-        xaxis: {visible: false, range: [-88, 90]},
-        yaxis: {visible: false, range: [-100, 110]},
-        zaxis: {visible: false, range: [-95, 92]}}
+        xaxis: {visible: false, autorange: false, range: [-88, 90]},
+        yaxis: {visible: false, autorange: false, range: [-100, 110]},
+        zaxis: {visible: false, autorange: false, range: [-95, 92]}}
     };
     await Plotly.react(viewer, traces, layout, {displayModeBar: false, scrollZoom: true, responsive: true});
     ready = true;
