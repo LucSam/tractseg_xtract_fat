@@ -2,34 +2,32 @@
 
 **Workflow author: Lucius Fekonja** · [GitHub: LucSam](https://github.com/LucSam)
 
-Reconstruct the left and right Frontal Aslant Tract (FAT) from an individual's
-white-matter FODs and brain-extracted T1:
-**HCP1065 atlas → individual registration → anatomical targets → MRtrix tracking**.
-A successful run saves **2000 complete streamlines per side for both iFOD2 and
-SD_STREAM**, contained inside the processed bundle mask.
+Reconstruct the Frontal Aslant Tract (FAT) from individual white-matter FODs
+and a brain-extracted T1, using HCP1065 atlas masks and anatomical cortical targets.
+Each successful reconstruction contains **2000 complete streamlines per side**,
+inside the processed bundle mask.
 
-![Right FAT, anterior view, direction RGB](assets/fat_3d.png)
+[![FAT in direction RGB — open the interactive 3D viewer](assets/fat_3d.png)](https://LucSam.github.io/tractseg_xtract_fat/)
 
-*Right FAT in the local example; translucent T1 brain surface. Direction colours:
-red = left–right, green = anterior–posterior, blue = inferior–superior.*
+[**Open the 3D viewer**](https://LucSam.github.io/tractseg_xtract_fat/) · Rotate, zoom,
+and compare iFOD2, SD_STREAM, FACT, Tensor_Det and Tensor_Prob.
 
-**You do not need to obtain the HCP atlas or FAT masks yourself.** The script
-downloads the HCP1065 atlas and matching ICBM2009a template automatically on first
-use, verifies their checksums and keeps a reusable local cache. No HCP account,
-TractSeg installation, pretrained weights, GPU or training dataset is required
-for this workflow. Your own preprocessed MRI inputs are required; patient data
-are not included in this public repository.
+`fat_simple.sh` is a standalone script with its preparation and validation code
+embedded. The atlas downloads automatically on first use. The current workflow
+uses HCP1065; the repository retains its original name.
 
-`fat_simple.sh` is self-contained: preparation and validation code are embedded
-below the shell commands. You can share that single file, or send colleagues
-**this repository link** and let them follow the tutorial below. The repository
-retains its original name, `tractseg_xtract_fat`; the current default uses HCP1065.
+## Table of contents
 
-[Installation and first run](#step-by-step-tutorial) ·
-[Troubleshooting](#troubleshooting) ·
-[Method and advanced options](METHODS.md) · [Validation](VALIDATION.md)
+- [Install](#install)
+- [How to use](#how-to-use)
+- [Tracking algorithms](#tracking-algorithms)
+- [FAQ](#faq)
+- [Method and scope](#method-and-scope)
+- [Advanced options](METHODS.md)
+- [Validation](VALIDATION.md)
+- [Attribution and references](#attribution)
 
-## Step-by-step tutorial
+## Install
 
 Use a **Bash or Zsh terminal on macOS or Linux**. The Linux installation route
 below is for x86_64. On Windows, first set up
@@ -186,6 +184,8 @@ PY
 Continue after `Dependencies and FSL atlas files OK.` No HCP atlas files are
 needed at this point; they are downloaded in step 7.
 
+## How to use
+
 ### 6. Prepare your input folder
 
 The required files are:
@@ -219,7 +219,7 @@ mrinfo "$IN/t1_brain.nii.gz" -size
 
 Expect `Input dimensions and grids OK.` and three dimensions for the T1.
 
-### 7. Run both hemispheres
+### 7. Run the reconstruction
 
 From the repository directory:
 
@@ -229,12 +229,11 @@ export ATLAS_DIR="$HOME/.cache/tractseg_xtract_fat/hcp1065"
 IN="$IN" OUT="$OUT" ATLAS_DIR="$ATLAS_DIR" bash fat_simple.sh > "$IN/fat_run.log" 2>&1
 ```
 
-`OUT` must be a new directory. This runs all four reconstructions: left/right
-with iFOD2 and SD_STREAM. Progress and errors are written to `fat_run.log`.
+`OUT` must be a new directory. This runs iFOD2, SD_STREAM and FACT for each side. Progress and errors are written to `fat_run.log`.
 In another terminal you can view progress with
 `tail -f /absolute/path/to/subject01/mri/fat_run.log`.
 
-**What happens to the missing atlas?** The script automatically downloads the
+The script downloads the
 HCP1065 probability archive and ICBM2009a template archive (about **77 MB** total),
 checks their SHA-256 hashes and extracts the two FAT maps and template files.
 The cache is shared between subjects. Further runs can use it offline. The
@@ -245,7 +244,7 @@ On completion, check the success marker:
 
 ```bash
 if [ -f "$OUT/SUCCESS" ]; then
-  echo "All four FAT reconstructions passed."
+  echo "All FAT reconstructions passed."
 else
   tail -n 40 "$IN/fat_run.log"
 fi
@@ -262,6 +261,8 @@ tckinfo "$OUT/iFOD2_trackings/FAT_left.tck" -count
 tckinfo "$OUT/iFOD2_trackings/FAT_right.tck" -count
 tckinfo "$OUT/SD_STREAM_trackings/FAT_left.tck" -count
 tckinfo "$OUT/SD_STREAM_trackings/FAT_right.tck" -count
+tckinfo "$OUT/FACT_trackings/FAT_left.tck" -count
+tckinfo "$OUT/FACT_trackings/FAT_right.tck" -count
 ```
 
 Each file should contain **2000 streamlines**. Open both iFOD2 bundles on the
@@ -279,7 +280,7 @@ without a graphical desktop, open the output files in MRview on your workstation
 
 | Output | Meaning |
 | --- | --- |
-| `iFOD2_trackings/`, `SD_STREAM_trackings/` | Final bilateral TCK files |
+| `iFOD2_trackings/`, `SD_STREAM_trackings/`, `FACT_trackings/` | Final TCK files |
 | `bundle_segmentations/` | Processed masks used for tracking and final containment checks |
 | `bundle_segmentations_original/` | Raw thresholded HCP1065 masks |
 | `anatomical_rois/` | Full registered IFG and SFG/SMA cortex regions |
@@ -289,7 +290,82 @@ without a graphical desktop, open the output files in MRview on your workstation
 | `work/atlas/` | Registered probabilities, T1 and transform provenance |
 | `SUCCESS` | All requested output checks passed |
 
-## Troubleshooting
+## Tracking algorithms
+
+All methods use the same registered bundle masks, cortical targets and final
+whole-streamline checks. The [3D viewer](https://LucSam.github.io/tractseg_xtract_fat/)
+shows a fixed subset of 500 of 2000 streamlines per side from the local example.
+Red/green/blue encode left–right/anterior–posterior/inferior–superior direction.
+
+| Method | Tracking input | Available through |
+| --- | --- | --- |
+| iFOD2 | FODs; probabilistic | `fat_simple.sh` and extended script |
+| SD_STREAM | FODs; deterministic | `fat_simple.sh` and extended script |
+| FACT | Three FOD peaks; deterministic | `fat_simple.sh` and extended script |
+| Tensor_Det | DWI with gradients; deterministic tensor tracking | Extended script |
+| Tensor_Prob | DWI with gradients; residual-bootstrap tensor tracking | Extended script |
+| Trekker / PTT | FODs; probabilistic parallel transport tracking | Not included; see [FAQ](#what-about-trekker) |
+| TractSeg probabilistic TOM tracking | A tract-specific orientation map (TOM) | Unavailable for FAT in this workflow |
+
+The default standalone script runs iFOD2, SD_STREAM and FACT. Select methods in
+the extended script, which requires the cloned repository:
+
+```bash
+ALGORITHMS="iFOD2 SD_STREAM FACT" \
+OUTPUT_DIR="$IN/fat_comparison" \
+bash tractseg_xtract_fat.sh run "$IN"
+```
+
+**Tensor tracking:** provide a preprocessed DWI `.mif` with its embedded gradient
+table in the same grid as the FODs. A fitted tensor image or FOD image is not a
+DWI input. The script selects b=0 plus the lowest nonzero shell and uses an FA
+cutoff of 0.1. It generates 8000 candidates per side to retain 2000 valid tracks.
+
+```bash
+DWI="/absolute/path/to/dwi_den_unr_pre_unbia.mif" \
+ALGORITHMS="Tensor_Det Tensor_Prob" \
+OUTPUT_DIR="$IN/fat_tensor" \
+bash tractseg_xtract_fat.sh run "$IN"
+```
+
+You can combine all five supported methods in `ALGORITHMS`. Tensor modes still
+require `DWI`. Each run needs a new output directory. FOD/peak and tensor cutoffs
+measure different quantities; algorithm comparisons are not a validation of
+anatomical completeness.
+[MRtrix algorithms](https://mrtrix.readthedocs.io/en/latest/reference/commands/tckgen.html).
+
+## FAQ
+
+### Why not the TractSeg tracking algorithm?
+
+TractSeg's own probabilistic tracker follows a learned, tract-specific orientation
+map (TOM). Its XTRACT model does not supply a FAT TOM. The HCP1065 probability mask
+used here supplies spatial coverage, not fibre orientations. Calling a generic
+FOD tracker “TractSeg” would therefore be misleading. This workflow supports
+TractSeg's MRtrix tracking alternatives, including FACT, SD_STREAM and iFOD2.
+[TractSeg implementation](https://github.com/MIC-DKFZ/TractSeg/blob/master/tractseg/libs/tracking.py).
+
+### What about Trekker?
+
+Baran Aydogan's [Trekker](https://dmritrekker.github.io/) implements probabilistic
+parallel transport tractography (PTT). A local rc6 pilot ran with the FAT masks,
+but yielded too few candidate connections during the short trial to establish
+a verified 2000-streamline result. It was stopped; this is not evidence that PTT
+cannot reconstruct the FAT. Trekker is not yet integrated into the released
+workflow or viewer.
+
+### Do I need to train a model?
+
+No. Atlas maps are registered to each individual's anatomy; tracking then uses
+that individual's diffusion data. There is no model training step.
+
+### Can the viewer run directly in the README?
+
+GitHub does not execute JavaScript in README files. The single preview links to
+the interactive viewer on GitHub Pages. [GitHub markup](https://github.com/github/markup).
+
+### Troubleshooting
+
 
 | Message / situation | Next step |
 | --- | --- |
@@ -330,10 +406,12 @@ These tools are optional for running the reconstruction:
 
 ```bash
 conda install -n fat --override-channels -c conda-forge shellcheck ruff mypy
+# Only needed when rebuilding the website from local TCK results:
+# conda install -n fat --override-channels -c conda-forge plotly scikit-image
 bash tests/verify.sh
 ```
 
-The suite runs 37 regression tests, ShellCheck, Ruff and mypy. Synthetic tests
+The suite runs 41 regression tests, ShellCheck, Ruff and mypy. Synthetic tests
 cover geometry, atlas handling, endpoint constraints and complete-polyline mask
 containment. Real MRI results are reported separately in [VALIDATION.md](VALIDATION.md).
 

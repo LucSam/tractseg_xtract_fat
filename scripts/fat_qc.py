@@ -485,6 +485,34 @@ def check_tracks(path: Path, requested: int, mask_path: Path | None = None,
     print(f"{path.name}: {count} streamlines OK{containment}{connection}")
 
 
+def tensor_shell(source: Path, reference: Path) -> float:
+    """Check DWI gradients and return the lowest nonzero MRtrix b-value shell."""
+    same_grid(reference, source)
+    shape, _ = geometry(source)
+    result = subprocess.run(["mrinfo", str(source), "-dwgrad"], capture_output=True, text=True)
+    if result.returncode:
+        raise ValueError(f"Cannot read DWI gradients from {source}: {result.stderr.strip()}")
+    gradients = np.array([[float(v) for v in line.split()]
+                          for line in result.stdout.splitlines() if line.strip()])
+    if (len(shape) != 4 or gradients.shape != (shape[-1], 4)
+            or not np.isfinite(gradients).all() or np.any(gradients[:, 3] < 0)):
+        raise ValueError("Tensor tracking requires 4D DWI with a finite embedded MRtrix gradient table.")
+    if not np.any(gradients[:, 3] < 100):
+        raise ValueError("Tensor tracking requires b=0 volumes.")
+    result = subprocess.run(["mrinfo", str(source), "-shell_bvalues"],
+                            check=True, capture_output=True, text=True)
+    shells = [float(v) for v in result.stdout.split() if float(v) >= 100]
+    if not shells:
+        raise ValueError("Tensor tracking requires diffusion-weighted volumes.")
+    shell = min(shells)
+    g = gradients[np.abs(gradients[:, 3] - shell) < max(100, shell * 0.1), :3]
+    design = np.column_stack((g[:, 0] ** 2, g[:, 1] ** 2, g[:, 2] ** 2,
+                              g[:, 0] * g[:, 1], g[:, 0] * g[:, 2], g[:, 1] * g[:, 2]))
+    if len(design) < 6 or np.linalg.matrix_rank(design) < 6:
+        raise ValueError("The lowest DWI shell needs at least six independent tensor directions.")
+    return shell
+
+
 def summary(out: Path) -> None:
     with (out / "qc_summary.csv").open("w", newline="") as stream:
         writer = csv.writer(stream)
@@ -518,7 +546,8 @@ def summary(out: Path) -> None:
         "Keep the largest face-connected component only if it contains at least 95% of threshold voxels.\n"
         "Mask processing: 3 mm bounded margin, Gaussian sigma 1 mm, threshold 0.5; preserve the retained component.\n"
         "Cavity filling is limited to that margin; disconnected processed masks fail.\n"
-        "Optional streamlines: MRtrix with ONE processed bundle mask; default cutoff 0.05.\n"
+        "Tracking: MRtrix with ONE processed bundle mask.\n"
+        "Default FOD/peak cutoff 0.05; tensor FA cutoff 0.1 (b0 plus lowest nonzero DWI shell).\n"
         "Whole streamlines leaving the mask are rejected; all vertices AND connecting segments are checked.\n"
         "Track in both directions from each seed, without stopping at the first complete set of ROI contacts.\n"
         "Tracking requires both endpoints in opposite end regions, in addition to whole-polyline containment.\n"
@@ -544,6 +573,9 @@ def main() -> None:
     inputs.add_argument("--peaks", type=Path)
     inputs.add_argument("--fod", type=Path)
     inputs.add_argument("--scalar", type=Path, action="append", default=[])
+    tensor = sub.add_parser("tensor-shell")
+    tensor.add_argument("source", type=Path)
+    tensor.add_argument("reference", type=Path)
     export = sub.add_parser("export")
     for name in ("source", "reference", "destination"):
         export.add_argument(name, type=Path)
@@ -593,6 +625,8 @@ def main() -> None:
             raise ValueError("Require 0 < MIN_LENGTH < MAX_LENGTH and CUTOFF > 0.")
     elif args.command == "inputs":
         validate_inputs(args.peaks, args.fod, args.scalar)
+    elif args.command == "tensor-shell":
+        print(f"{tensor_shell(args.source, args.reference):.6g}")
     elif args.command == "export":
         export_mask(args.source, args.reference, args.destination)
     elif args.command == "prepare-peaks":

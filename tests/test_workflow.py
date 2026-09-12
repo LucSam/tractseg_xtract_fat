@@ -72,6 +72,49 @@ class WorkflowTests(unittest.TestCase):
         np.testing.assert_array_equal(clean[0, 0, 0], [1, 1, 1, 0, 0, 0, 1, 1, 1])
         self.assertTrue(np.isnan(data[0, 0, 0, 3]))
 
+    def tensor_input(self, degenerate: bool = False) -> Path:
+        directions = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1],
+                               [1, 1, 0], [1, 0, 1], [0, 1, 1]], dtype=float)
+        directions /= np.linalg.norm(directions, axis=1, keepdims=True)
+        if degenerate:
+            directions[:] = [1, 0, 0]
+        gradients = np.vstack((np.zeros((1, 4)),
+                               np.column_stack((directions, np.full(6, 1500))),
+                               np.column_stack((directions, np.full(6, 3000)))))
+        table = self.folder / "gradients.txt"
+        np.savetxt(table, gradients)
+        image = self.save("dwi.nii.gz", np.ones((4, 5, 6, 13)))
+        output = self.folder / "dwi.mif"
+        subprocess.run(["mrconvert", str(image), str(output), "-grad", str(table), "-quiet"], check=True)
+        return output
+
+    def test_tensor_input_selects_lowest_shell_and_preserves_read_only_check(self) -> None:
+        dwi = self.tensor_input()
+        self.assertAlmostEqual(qc.tensor_shell(dwi, self.fod), 1500)
+        result = self.cli("dry-run", str(self.folder), ALGORITHMS="Tensor_Det Tensor_Prob", DWI=str(dwi))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        commands = [shlex.split(line[2:]) for line in result.stdout.splitlines() if line.startswith("+ ")]
+        extraction = next(cmd for cmd in commands if cmd[0] == "dwiextract")
+        self.assertEqual(extraction[extraction.index("-shells") + 1], "0,1500")
+        for cmd in (cmd for cmd in commands if cmd[0] == "tckgen"):
+            self.assertEqual(cmd[1], extraction[2])
+            self.assertEqual(cmd[cmd.index("-cutoff") + 1], "0.1")
+        self.assertFalse((self.folder / "tractseg_xtract_fat_output").exists())
+
+    def test_tensor_input_rejects_missing_gradients(self) -> None:
+        result = self.cli("check", str(self.folder), ALGORITHMS="Tensor_Det", DWI=str(self.fod))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("gradient", result.stderr.lower())
+
+    def test_tensor_input_rejects_degenerate_directions(self) -> None:
+        with self.assertRaisesRegex(ValueError, "independent tensor directions"):
+            qc.tensor_shell(self.tensor_input(degenerate=True), self.fod)
+
+    def test_tensor_input_rejects_grid_mismatch(self) -> None:
+        shifted = self.save("shifted_fod.nii.gz", np.ones((4, 5, 6, 45)), shift=5)
+        with self.assertRaisesRegex(ValueError, "Grid mismatch"):
+            qc.tensor_shell(self.tensor_input(), shifted)
+
     def test_partial_nan_or_inf_rejected(self) -> None:
         for value in (np.nan, np.inf):
             with self.subTest(value=value):
@@ -405,7 +448,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn("--endings", cmd)
         simple = (ROOT / "fat_simple.sh").read_text().split("# Embedded Python helper.", 1)[0]
         generators = [shlex.split(line.strip()) for line in simple.splitlines() if line.strip().startswith("tckgen ")]
-        self.assertEqual(len(generators), 4)
+        self.assertEqual(len(generators), 6)
         for cmd in generators:
             self.assertEqual(cmd.count("-include"), 2)
             self.assertEqual(cmd.count("-mask"), 1)

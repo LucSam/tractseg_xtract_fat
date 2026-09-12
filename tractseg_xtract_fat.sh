@@ -22,8 +22,11 @@ Environment:
   PYTHON=python3   Python with numpy, nibabel, scipy.
   NTHREADS=4       CPUs for ANTs/MRtrix.
   ALGORITHMS="iFOD2 SD_STREAM FACT"  Tracking algorithms for run/dry-run.
+  Also supported: Tensor_Det Tensor_Prob.
+  DWI              Tensor input: DWI .mif with gradients (default: DWI_DIR/dwi_den_unr_pre_unbia.mif).
+  TENSOR_FA=0.1    Tensor stopping FA; uses b0 plus the lowest nonzero DWI shell.
   N_STREAMLINES=2000  MAX_SEEDS=2000000
-  Twice N_STREAMLINES candidates are generated; retain exactly N_STREAMLINES
+  Twice N_STREAMLINES candidates (four times for tensor tracking); retain N_STREAMLINES
   whole streamlines inside the mask, with endpoints in opposite end regions.
   MIN_LENGTH=20   MAX_LENGTH=150   CUTOFF=0.05
   DENSITY=0       Also predict XTRACT density maps (1 to enable).
@@ -76,6 +79,7 @@ MAX_SEEDS="${MAX_SEEDS:-2000000}"
 MIN_LENGTH="${MIN_LENGTH:-20}"
 MAX_LENGTH="${MAX_LENGTH:-150}"
 CUTOFF="${CUTOFF:-0.05}"
+TENSOR_FA="${TENSOR_FA:-0.1}"
 DENSITY="${DENSITY:-0}"
 COMPUTE_FA="${COMPUTE_FA:-0}"
 read -r -a algorithms <<< "${ALGORITHMS:-iFOD2 SD_STREAM FACT}"
@@ -84,12 +88,13 @@ for value in "$NTHREADS" "$N_STREAMLINES" "$MAX_SEEDS"; do
 done
 [[ "$DENSITY" =~ ^[01]$ && "$COMPUTE_FA" =~ ^[01]$ ]] || die 'DENSITY and COMPUTE_FA must be 0 or 1.'
 for algorithm in "${algorithms[@]}"; do
-  case "$algorithm" in iFOD2|SD_STREAM|FACT) ;; *) die "Unsupported algorithm: $algorithm" ;; esac
+  case "$algorithm" in iFOD2|SD_STREAM|FACT|Tensor_Det|Tensor_Prob) ;; *) die "Unsupported algorithm: $algorithm" ;; esac
 done
 [[ ${#algorithms[@]} -gt 0 ]] || die 'ALGORITHMS must not be empty.'
 for command in "$PYTHON" mrinfo mrconvert sh2peaks; do need "$command"; done
 [[ "$DENSITY" == 0 ]] || need TractSeg
 "$PYTHON" "$SCRIPT_DIR/scripts/fat_qc.py" parameters "$MIN_LENGTH" "$MAX_LENGTH" "$CUTOFF"
+"$PYTHON" "$SCRIPT_DIR/scripts/fat_qc.py" parameters "$MIN_LENGTH" "$MAX_LENGTH" "$TENSOR_FA"
 
 for input in "$@"; do
   [[ -d "$input" ]] || die "Input directory missing: $input"
@@ -100,6 +105,16 @@ for input in "$@"; do
   mask="$(choose_file "$input/mask.nii.gz" "$input/mask.mif")"
   scalar="$(choose_file "$input/fa.nii.gz" "$input/fa.mif")"
   [[ -n "$fod" ]] || die "Atlas registration requires wm.nii.gz/wm.mif in $input"
+  dwi="${DWI:-$input/dwi_den_unr_pre_unbia.mif}"
+  tensor_bvalue=""
+  for algorithm in "${algorithms[@]}"; do
+    case "$algorithm" in
+      Tensor_*)
+        need dwiextract
+        tensor_bvalue="$("$PYTHON" "$SCRIPT_DIR/scripts/fat_qc.py" tensor-shell "$dwi" "$fod")"
+        ;;
+    esac
+  done
   [[ -f "${T1:-$input/t1_brain.nii.gz}" ]] || die "Atlas registration requires a brain-extracted T1."
   for command in antsRegistrationSyNQuick.sh antsApplyTransforms curl; do need "$command"; done
   if [[ "$MODE" == run || "$MODE" == dry-run ]]; then
@@ -141,7 +156,8 @@ for input in "$@"; do
     export OMP_NUM_THREADS="$NTHREADS"
     export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS="$NTHREADS"
     export MKL_NUM_THREADS="$NTHREADS"
-    mkdir -p "$TRACTSEG_WEIGHTS_DIR" "$MPLCONFIGDIR" "$XDG_CACHE_HOME"
+    mkdir -p "$MPLCONFIGDIR" "$XDG_CACHE_HOME"
+    [[ "$DENSITY" == 0 ]] || mkdir -p "$TRACTSEG_WEIGHTS_DIR"
     printf 'Input: %s\nMode: %s\n' "$input" "$MODE"
     mrinfo -version
   fi
@@ -151,6 +167,9 @@ for input in "$@"; do
   fi
   run "$PYTHON" "$SCRIPT_DIR/scripts/fat_qc.py" prepare-peaks "$peaks" "$out/work/peaks.nii.gz"
   peaks="$out/work/peaks.nii.gz"
+  if [[ -n "$tensor_bvalue" ]]; then
+    run dwiextract "$dwi" "$out/work/tensor_dwi.mif" -shells "0,$tensor_bvalue" -nthreads "$NTHREADS"
+  fi
   atlas_args=(--threads "$NTHREADS" --atlas-dir "${ATLAS_DIR:-$SCRIPT_DIR/atlases/hcp1065}")
   [[ -z "${T1_TO_MNI_PREFIX:-}" ]] || atlas_args+=(--mni-prefix "$T1_TO_MNI_PREFIX")
   [[ -z "${T1_TO_ICBM_PREFIX:-}" ]] || atlas_args+=(--icbm-prefix "$T1_TO_ICBM_PREFIX")
@@ -197,7 +216,12 @@ for input in "$@"; do
         begin="$out/endings_segmentations/${name}_b.nii.gz"
         end="$out/endings_segmentations/${name}_e.nii.gz"
         source="$fod"
+        cutoff="$CUTOFF"
+        candidate_count="$((N_STREAMLINES * 2))"
         [[ "$algorithm" != FACT ]] || source="$peaks"
+        if [[ "$algorithm" == Tensor_* ]]; then
+          source="$out/work/tensor_dwi.mif"; cutoff="$TENSOR_FA"; candidate_count="$((N_STREAMLINES * 4))"
+        fi
         seed="$out/seed_masks/${name}_b.nii.gz"
         [[ -z "${ROI_DIR:-}" ]] || seed="$begin"
         roi_args=(-seed_image "$seed" -include "$begin" -include "$end")
@@ -207,8 +231,8 @@ for input in "$@"; do
         # Multiple MRtrix -mask options are a UNION, not an intersection.
         # Use only the saved processed bundle mask, also used by the final filter.
         run tckgen "$source" "$candidates" -algorithm "$algorithm" "${roi_args[@]}" -mask "$bundle" \
-          -select "$((N_STREAMLINES * 2))" -seeds "$MAX_SEEDS" -minlength "$MIN_LENGTH" -downsample 1 \
-          -maxlength "$MAX_LENGTH" -cutoff "$CUTOFF" -nthreads "$NTHREADS"
+          -select "$candidate_count" -seeds "$MAX_SEEDS" -minlength "$MIN_LENGTH" -downsample 1 \
+          -maxlength "$MAX_LENGTH" -cutoff "$cutoff" -nthreads "$NTHREADS"
         run "$PYTHON" "$SCRIPT_DIR/scripts/fat_qc.py" filter-tracks "$candidates" "$bundle" "$tracks" "$N_STREAMLINES" --endings "$begin" "$end"
         run "$PYTHON" "$SCRIPT_DIR/scripts/fat_qc.py" tracks "$tracks" "$N_STREAMLINES" --mask "$bundle" --endings "$begin" "$end"
         run tckmap "$tracks" "$out/track_density/$algorithm/$name.nii.gz" -template "$bundle" -upsample 1 -nthreads "$NTHREADS"

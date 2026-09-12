@@ -2,7 +2,7 @@
 
 **Workflow author: Lucius Fekonja**
 
-For installation and your first reconstruction, start with the [README tutorial](README.md#step-by-step-tutorial).
+For installation and your first reconstruction, start with the [README tutorial](README.md#install).
 See [VALIDATION.md](VALIDATION.md) for measured results and limitations.
 
 ## Bundle masks
@@ -74,7 +74,7 @@ files and actual commands used.
 
 ## Tracking and checks
 
-The standalone script runs **iFOD2 and SD_STREAM**, both hemispheres. It seeds the
+The standalone script runs **iFOD2, SD_STREAM and FACT**. It seeds the
 inferior-frontal ROI/bundle intersection, grows in both directions and requires
 both cortical inclusion regions. It uses **one** processed bundle `-mask`.
 There is no early ROI stopping. Defaults: 20–150 mm, cutoff 0.05, 4000 candidates,
@@ -103,6 +103,7 @@ fat_output/
   seed_masks/FAT_{left,right}_{b,e}.nii.gz
   iFOD2_trackings/FAT_{left,right}.tck
   SD_STREAM_trackings/FAT_{left,right}.tck
+  FACT_trackings/FAT_{left,right}.tck
   qc_summary.csv
   roi_qc.csv
   METHOD.txt
@@ -119,9 +120,9 @@ prove anatomical tract interruption.
 
 `tractseg_xtract_fat.sh` uses the same HCP1065 preparation and tracking defaults,
 with an external copy of the embedded helper. It adds batch processing, optional
-FACT, track densities, mean FA and native ROI overrides. It accepts `wm.mif` and
+tensor tracking, track densities, mean FA and native ROI overrides. It accepts `wm.mif` and
 can generate missing peaks. This alternative requires the repository; sharing
-the standalone script remains sufficient for iFOD2/SD_STREAM.
+the standalone script remains sufficient for iFOD2/SD_STREAM/FACT.
 
 ```bash
 bash tractseg_xtract_fat.sh --help
@@ -142,3 +143,11 @@ override the cortical tracking constraints; atlas bundle registration still runs
 therefore requires TractSeg/weights. It does not change the HCP1065 tracking masks.
 `COMPUTE_FA=1` fits absent FA from `dwi_den_unr_pre_unbia.mif` and a brain mask.
 Mean FA per streamline is not an anatomically corresponding along-tract profile.
+
+### Additional algorithms
+
+Tensor_Det and Tensor_Prob take DWI with embedded gradients, after extraction of
+b=0 and the lowest nonzero shell. Both use `TENSOR_FA=0.1` and generate four times
+the requested final count; other algorithms generate twice the final count.
+FACT uses cleaned three-peak images. All MRtrix modes share mask and endpoint
+checks. See the [algorithm tutorial](README.md#tracking-algorithms).

@@ -1,0 +1,13 @@
+{
+  "algorithms": [
+    "iFOD2",
+    "SD_STREAM",
+    "FACT",
+    "Tensor_Det",
+    "Tensor_Prob"
+  ],
+  "streamlines_per_side": 2000,
+  "displayed_per_side": 500,
+  "colours": "Absolute RAS tangent: red left-right, green anterior-posterior, blue inferior-superior",
+  "source": "HCP1065 FAT workflow example; Lucius Fekonja"
+}

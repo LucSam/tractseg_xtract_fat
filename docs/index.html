@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FAT · Lucius Fekonja</title>
+  <meta name="description" content="Explore the Frontal Aslant Tract in 3D and compare tracking algorithms.">
+  <link rel="stylesheet" href="viewer.css">
+  <script defer src="vendor/plotly.min.js"></script>
+  <script defer src="viewer.js"></script>
+</head>
+<body>
+  <header>
+    <h1>FAT</h1>
+    <label>Algorithm
+      <select id="algorithm" disabled>
+        <option>iFOD2</option><option>SD_STREAM</option><option>FACT</option>
+        <option>Tensor_Det</option><option>Tensor_Prob</option>
+      </select>
+    </label>
+    <label>Side
+      <select id="side"><option value="both">Both</option><option value="left">Left</option><option value="right">Right</option></select>
+    </label>
+    <label class="checkbox"><input id="brain" type="checkbox" checked> Brain</label>
+    <button id="reset" type="button">Front view</button>
+    <a class="repository" href="https://github.com/LucSam/tractseg_xtract_fat">Tutorial ↗</a>
+  </header>
+  <main id="viewer" aria-label="Interactive 3D Frontal Aslant Tract; drag to rotate and scroll to zoom"></main>
+  <footer>
+    <span id="status" role="status" aria-live="polite">Loading 3D view…</span>
+    <span>Drag to rotate · scroll to zoom</span>
+    <a href="https://github.com/LucSam">Lucius Fekonja</a>
+  </footer>
+  <noscript>This viewer requires JavaScript. <a href="https://github.com/LucSam/tractseg_xtract_fat">View the preview and tutorial.</a></noscript>
+</body>
+</html>

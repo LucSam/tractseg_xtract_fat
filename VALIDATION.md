@@ -107,7 +107,7 @@ An initial HCP1065 run with a 1.5 mm margin yielded few left connections and was
 stopped before completion. A 50,000-seed probe using the whole mask produced only
 15 candidates. Keeping the same cortical constraints and increasing the mask
 margin to 3 mm produced 200 candidates within 7455 seed attempts in a bounded
-probe. The final bilateral workflow uses 3 mm; it does not silently retry larger
+probe. The final workflow uses 3 mm; it does not silently retry larger
 margins or weaker thresholds after failure. These exploratory observations on one
 subject do not establish an optimal threshold or margin for other patients.
 
@@ -157,7 +157,7 @@ The incomplete 1.5 mm pilot is separately retained in
 bash tests/verify.sh
 ```
 
-Final verification: **37 tests passed; zero ShellCheck/Ruff warnings; zero mypy
+Current software verification: **41 tests passed; zero ShellCheck/Ruff warnings; zero mypy
 errors; `git diff --check` clean.** Tests include probability scale validation,
 small-island accounting, rejection of major disconnected components, physical
 mask bounds, atlas checksums, separate ICBM/FSL transformation chains, cortical
@@ -169,8 +169,8 @@ dataset owner; the earlier left reconstruction failure is not evidence of a
 left tumour or anatomical transection. Broader priors and successful geometric
 checks can also admit false-positive trajectories. General applicability, local
 registration near pathology and anterior extended-FAT coverage remain unvalidated.
-Optional FACT, density prediction, FA fitting and external ROI branches have not
-been newly tested on real data in this revision.
+Density prediction, FA fitting and external ROI overrides have not been newly
+tested on real data in this revision. FACT and tensor tracking are covered below.
 
 ## Installation tutorial checks
 
@@ -186,3 +186,50 @@ No new tractography parameters were changed by the documentation/cleanup update.
 Old local experiments were moved under `results/archive/`; the current
 `results/hcp1065_fat/`, its registration records and the previous XTRACT comparator
 remain directly accessible. The atlas cache is retained for offline reuse.
+
+## Tracking comparison and public viewer — 12 September 2026
+
+The [public 3D viewer](https://LucSam.github.io/tractseg_xtract_fat/) compares
+**iFOD2, SD_STREAM, FACT, Tensor_Det and Tensor_Prob**. Each method has two source
+TCK files with **2000 whole streamlines per side**. A fixed quarter (500 per side)
+is exported for interactive display, with direction RGB and a brain surface.
+The README contains one preview linked to the viewer. No JavaScript executes
+inside GitHub's README renderer.
+
+FACT and tensor results are stored locally in `results/hcp1065_algorithms/`.
+The masks and end regions match the HCP1065 iFOD2/SD_STREAM run. All six additional
+TCK files passed whole-polyline containment and opposite-endpoint checks.
+`independent_validation.log` and `validated_algorithms.json` record this check.
+
+Tensor tracking used the example's preprocessed DWI with its embedded gradients:
+7 near-b0 volumes plus 46 directions at approximately b=1500 s/mm²; the b=3000
+shell was excluded. Tensor stopping FA was 0.1. The first Tensor_Det left trial
+retained 1620/2000 tracks from 4000 candidates. Raising the candidate target to
+8000 supplied the requested 2000 without changing the masks or endpoint rules.
+Both tensor algorithms passed on both sides with that target. FACT used a peak
+amplitude cutoff of 0.05 and 4000 candidates.
+
+A subsequent Trekker rc6 prototype was stopped after a short, low-yield pilot.
+Its incomplete outputs and logs are archived under `results/archive/trekker_pilot/`.
+They are excluded from the published viewer and from the successful MRtrix
+validation. Trekker is not part of the released script. TractSeg's own TOM tracker
+is also not included because the atlas workflow has no learned FAT TOM.
+
+The website data exporter rechecks the 2000-streamline count, every crossed voxel,
+endpoints and equality of comparison masks before exporting display geometry.
+Rebuild from local validated results (requires Plotly and scikit-image):
+
+```bash
+python3 scripts/build_viewer.py \
+  --fod-results results/hcp1065_fat \
+  --extra-results results/hcp1065_algorithms
+```
+
+These results establish geometric constraints in this one example. Different
+tracking models can produce different shapes and false positives inside the same
+mask; the viewer is a method comparison, not an anatomical validation.
+
+Browser checks passed for all five algorithms, displayed counts, side selection,
+brain visibility, camera retention and reset, and desktop/mobile layouts.
+The five MRtrix methods have no remaining validation failures in this example;
+Trekker and TractSeg TOM tracking remain unavailable as described above.
