@@ -295,12 +295,16 @@ bash fat.sh --input "$IN" --output "$IN/fat_5000" \
 | `--tensor-fa` | `0.1` | FA cutoff for tensor tracking |
 | `--min-length` | `20` | Minimum streamline length, mm |
 | `--max-length` | `150` | Maximum streamline length, mm |
-| `--threads` | `4` | CPU threads |
+| `--threads` | All available logical CPUs | CPU threads; respects process CPU affinity where supported |
 | `--max-seeds` | `2000000` | Maximum seed attempts per side and algorithm |
 | `--candidates` | Twice the target; four times for tensors | Candidate tracks before containment and endpoint checks |
 | `--mask-threshold` | `0.05` | HCP1065 probability threshold |
 | `--mask-margin` | `3` | Bundle mask margin, mm |
 | `--roi-margin` | `3` | Cortical end-region margin, mm |
+
+By default, registration and tracking use all available logical CPUs. Set
+`--threads N` to choose a different count, for example `--threads 4` to leave
+capacity for other work. The effective count is recorded in `run.json`.
 
 Show all options or preview the commands:
 
@@ -348,6 +352,10 @@ bash tests/verify.sh
 
 The checks cover image geometry, atlas integrity, command-line options, mask
 containment and endpoint connections, followed by ShellCheck, Ruff and mypy.
+
+For the viewer's tube geometry, run `node --test tests/viewer_mesh.test.cjs`
+with Node.js installed. The optional browser check is described in
+`tests/viewer_geometry_check.py`.
 
 ## Attribution
 

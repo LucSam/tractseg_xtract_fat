@@ -511,6 +511,41 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(c[c.index("--endings") - 1], "2000")
         self.assertFalse(any(c[0] == "sh2peaks" for c in commands))
 
+    def test_available_threads_respects_process_affinity(self) -> None:
+        with patch.object(qc.os, "sched_getaffinity", return_value={2, 3}, create=True), \
+                patch.object(qc.os, "cpu_count", return_value=16):
+            self.assertEqual(qc.available_threads(), 2)
+
+    def test_available_threads_falls_back_to_cpu_count_or_one(self) -> None:
+        for affinity in (None, unittest.mock.Mock(side_effect=OSError("unavailable"))):
+            for detected, expected in ((16, 16), (None, 1)):
+                with self.subTest(affinity=affinity, detected=detected), \
+                        patch.object(qc.os, "sched_getaffinity", affinity, create=True), \
+                        patch.object(qc.os, "cpu_count", return_value=detected):
+                    self.assertEqual(qc.available_threads(), expected)
+
+    def test_thread_default_and_override_reach_all_pipeline_stages(self) -> None:
+        for arguments, expected in (([], str(qc.available_threads())), (["--threads", "2"], "2")):
+            with self.subTest(arguments=arguments):
+                result = self.cli("--dry-run", "--input", str(self.folder), *arguments)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                commands = [shlex.split(line[2:]) for line in result.stdout.splitlines() if line.startswith("+ ")]
+                settings = next(command for command in commands if "settings" in command)
+                self.assertIn(f"threads={expected}", settings)
+                atlas = next(command for command in commands if "atlas-to-subject" in command)
+                self.assertEqual(atlas[atlas.index("--threads") + 1], expected)
+                for command in (c for c in commands if "-nthreads" in c):
+                    self.assertEqual(command[command.index("-nthreads") + 1], expected)
+                self.assertFalse((self.folder / "fat_output").exists())
+
+    def test_invalid_thread_counts_are_rejected(self) -> None:
+        for threads in ("0", "-1", "1.5", "all"):
+            with self.subTest(threads=threads):
+                result = self.cli("--check", "--input", str(self.folder), "--threads", threads)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("positive integers", result.stderr)
+                self.assertFalse((self.folder / "fat_output").exists())
+
     def test_selected_algorithms_and_parameters_reach_tracking(self) -> None:
         result = self.cli("--dry-run", "--input", str(self.folder), "--algorithm", "SD_STREAM,FACT",
                           "--streamlines", "57", "--candidates", "200", "--cutoff", "0.08",

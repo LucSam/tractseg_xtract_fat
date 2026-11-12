@@ -16,7 +16,7 @@ Usage: bash fat.sh --input MRI_DIR [options]
   --tensor-fa FLOAT       Tensor FA cutoff (0.1)
   --min-length MM        Minimum streamline length (20)
   --max-length MM        Maximum streamline length (150)
-  --threads N            CPU threads (4)
+  --threads N            CPU threads (default: all available logical CPUs)
   --max-seeds N          Maximum seed attempts per side/algorithm (2000000)
   --candidates N         Candidates per side (2 x streamlines; 4 x for tensors)
   --mask-threshold FLOAT HCP1065 probability threshold (0.05)
@@ -51,7 +51,7 @@ run_fat_pipeline() {
   set -euo pipefail
   local input="" out="" mode=run algorithm_list=iFOD2
   local streamlines=2000 cutoff=0.05 tensor_fa=0.1 min_length=20 max_length=150
-  local threads=4 max_seeds=2000000 candidates="" mask_threshold=0.05 mask_margin=3 roi_margin=3
+  local threads="" max_seeds=2000000 candidates="" mask_threshold=0.05 mask_margin=3 roi_margin=3
   local t1="" dwi="" atlas_dir="${HOME}/.cache/tractseg_xtract_fat/hcp1065" fsl_dir="${FSLDIR:-}"
   local mni_prefix="" icbm_prefix="" dwi_affine="" value algorithm
   local -a algorithms atlas_args
@@ -89,6 +89,7 @@ run_fat_pipeline() {
   fi
 
   # Check the requested settings, installed resources and subject inputs.
+  if [[ -z "$threads" ]]; then threads="$(fat_qc cpu-count)"; fi
   for value in "$threads" "$streamlines" "$max_seeds" "${candidates:-1}"; do
     [[ "$value" =~ ^[1-9][0-9]*$ ]] || die 'Threads and streamline/seed counts must be positive integers.'
   done
@@ -196,6 +197,7 @@ import csv
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -206,6 +208,17 @@ from zipfile import ZipFile
 import nibabel as nib
 import numpy as np
 from scipy import ndimage as ndi
+
+
+def available_threads() -> int:
+    """Use all logical CPUs available to this process, respecting CPU affinity."""
+    affinity = getattr(os, "sched_getaffinity", None)
+    if affinity is not None:
+        try:
+            return max(1, len(affinity(0)))
+        except OSError:
+            pass
+    return os.cpu_count() or 1
 
 
 def load_nifti(path: Path) -> nib.Nifti1Image:
@@ -512,9 +525,11 @@ def probability_bundle(source: Path, original: Path, destination: Path,
 
 def atlas_to_subject(t1: Path, reference: Path, fsl_dir: Path, out: Path,
                      mni_prefix: str | None = None, dwi_affine: Path | None = None,
-                     threads: int = 4, atlas_dir: Path = Path('atlases/hcp1065'),
+                     threads: int | None = None, atlas_dir: Path = Path('atlases/hcp1065'),
                      icbm_prefix: str | None = None) -> None:
     """Register atlas priors through this subject's T1 into the diffusion grid."""
+    if threads is None:
+        threads = available_threads()
     if out.exists():
         raise ValueError(f"Output already exists: {out}")
     atlas = fsl_dir / "data/atlases/HarvardOxford/HarvardOxford-cort-maxprob-thr25-1mm.nii.gz"
@@ -774,6 +789,7 @@ def summary(out: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("cpu-count")
     sub.add_parser("setup-atlas").add_argument("folder", type=Path)
     prereq = sub.add_parser("prerequisites")
     for name in ("atlas-dir", "fsl-dir", "t1"):
@@ -817,7 +833,7 @@ def main() -> None:
         atlas.add_argument(f"--{name}", type=Path, required=True)
     atlas.add_argument("--mni-prefix")
     atlas.add_argument("--dwi-affine", type=Path)
-    atlas.add_argument("--threads", type=int, default=4)
+    atlas.add_argument("--threads", type=int)
     atlas.add_argument('--atlas-dir', type=Path, default=Path('atlases/hcp1065'))
     atlas.add_argument('--icbm-prefix')
     endings = sub.add_parser("endings")
@@ -838,7 +854,9 @@ def main() -> None:
     filtering.add_argument("--endings", nargs=2, type=Path, metavar=("BEGIN", "END"))
     sub.add_parser("summary").add_argument("out", type=Path)
     args = parser.parse_args()
-    if args.command == "setup-atlas":
+    if args.command == "cpu-count":
+        print(available_threads())
+    elif args.command == "setup-atlas":
         setup_atlas(args.folder)
     elif args.command == "prerequisites":
         prerequisites(args.atlas_dir, args.fsl_dir, args.t1)

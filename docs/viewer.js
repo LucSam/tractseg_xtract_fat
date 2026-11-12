@@ -1,4 +1,4 @@
-/* global Plotly */
+/* global Plotly, tractMesh */
 "use strict";
 
 const viewer = document.getElementById("viewer");
@@ -31,8 +31,9 @@ async function showAlgorithm() {
   status.textContent = `Loading ${requested}…`;
   try {
     const lines = await loadJSON(requested);
+    const tracts = lines.map(tractMesh);
     const visible = visibility();
-    const traces = [brainMesh, ...lines].map((trace, i) => ({...trace, visible: visible[i]}));
+    const traces = [brainMesh, ...tracts].map((trace, i) => ({...trace, visible: visible[i]}));
     const layout = {
       paper_bgcolor: "black", plot_bgcolor: "black", margin: {l: 0, r: 0, t: 0, b: 0},
       showlegend: false, uirevision: "fat-camera",
