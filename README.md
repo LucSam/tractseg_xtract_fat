@@ -7,7 +7,7 @@ and a brain-extracted T1, using HCP1065 atlas masks and cortical target regions.
 `fat.sh` runs iFOD2 with 2000 streamlines per side by default. Tracking algorithms,
 streamline counts and mask settings are selectable through command-line options.
 
-[![FAT in direction RGB — open the 3D viewer](assets/fat_3d.png)](https://lucsam.github.io/tractseg_xtract_fat/)
+[![FAT in direction RGB with fixed skylight reflections — open the 3D viewer](assets/fat_3d.png?v=2)](https://lucsam.github.io/tractseg_xtract_fat/)
 
 [Open the 3D viewer](https://lucsam.github.io/tractseg_xtract_fat/) to rotate the
 tracts and select iFOD2, SD_STREAM, FACT, Tensor_Det or Tensor_Prob.
@@ -355,7 +355,8 @@ containment and endpoint connections, followed by ShellCheck, Ruff and mypy.
 
 For the viewer's tube geometry, run `node --test tests/viewer_mesh.test.cjs`
 with Node.js installed. The optional browser check is described in
-`tests/viewer_geometry_check.py`.
+`tests/viewer_geometry_check.py`. To verify the fixed skylight and regenerate
+the preview image, see `tests/viewer_lighting_check.py`.
 
 ## Attribution
 

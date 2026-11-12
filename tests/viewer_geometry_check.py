@@ -85,6 +85,10 @@ def main() -> None:
                              "document.getElementById('algorithm').dispatchEvent(new Event('change'));true")
             browser.wait_for(f"document.getElementById('viewer').dataset.algorithm === {json.dumps(algorithm)}"
                              " && !document.getElementById('algorithm').disabled")
+            if not browser.evaluate("""Object.values(document.getElementById('viewer')._fullLayout.scene._scene.traces)
+                .every(({mesh}) => mesh.gl.getProgramParameter(mesh.triShader.program, mesh.gl.LINK_STATUS)
+                  && mesh.gl.getShaderSource(mesh.triShader.vertShader).includes('skyPosition - worldPosition.xyz'))"""):
+                raise AssertionError(f"Fixed skylight shader missing or invalid for {algorithm}")
             for side in ("both", "left", "right"):
                 browser.evaluate(f"document.getElementById('side').value={json.dumps(side)};"
                                  "document.getElementById('side').dispatchEvent(new Event('change'));true")

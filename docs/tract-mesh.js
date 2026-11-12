@@ -36,7 +36,6 @@ function tractMesh(trace) {
     i: new Uint32Array(faces), j: new Uint32Array(faces), k: new Uint32Array(faces),
     vertexcolor: new Array(vertices), flatshading: false,
     lighting: {ambient: 0.32, diffuse: 0.72, specular: 1.5, roughness: 0.2, fresnel: 0.3},
-    lightposition: {x: 1000, y: 1500, z: 2000},
     opacity: 1, hoverinfo: "skip", showscale: false, showlegend: false
   };
   const circle = Array.from({length: sides}, (_, side) => {

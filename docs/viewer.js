@@ -1,4 +1,4 @@
-/* global Plotly, tractMesh */
+/* global Plotly, tractMesh, applySkyLight */
 "use strict";
 
 const viewer = document.getElementById("viewer");
@@ -47,6 +47,7 @@ async function showAlgorithm() {
         zaxis: {visible: false, autorange: false, range: [-95, 92]}}
     };
     await Plotly.react(viewer, traces, layout, {displayModeBar: false, scrollZoom: true, responsive: true});
+    applySkyLight(viewer);
     ready = true;
     current = requested;
     viewer.dataset.algorithm = current;
