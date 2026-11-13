@@ -1,14 +1,16 @@
-/* global Plotly, tractMesh, applySkyLight */
+/* global Plotly, tractMesh, applySkyLight, addCortexToon */
 "use strict";
 
 const viewer = document.getElementById("viewer");
 const algorithm = document.getElementById("algorithm");
 const side = document.getElementById("side");
-const brain = document.getElementById("brain");
+const contours = document.getElementById("contours");
+const folds = document.getElementById("folds");
 const status = document.getElementById("status");
-const frontCamera = () => ({eye: {x: 0, y: 1.5, z: 0.1}, up: {x: 0, y: 0, z: 1}});
-const cache = new Map();
-let brainMesh;
+const frontCamera = () => ({eye: {x: 0, y: 1.45, z: 0}, up: {x: 0, y: 0, z: 1}});
+// The local file preview embeds the same data used by the hosted viewer.
+const cache = new Map(Object.entries(window.FAT_VIEWER_DATA || {}));
+let surface, cortex;
 let current = "iFOD2";
 let ready = false;
 
@@ -22,7 +24,7 @@ async function loadJSON(name) {
 }
 
 function visibility() {
-  return [brain.checked, side.value !== "right", side.value !== "left"];
+  return [side.value !== "right", side.value !== "left"];
 }
 
 async function showAlgorithm() {
@@ -33,7 +35,7 @@ async function showAlgorithm() {
     const lines = await loadJSON(requested);
     const tracts = lines.map(tractMesh);
     const visible = visibility();
-    const traces = [brainMesh, ...tracts].map((trace, i) => ({...trace, visible: visible[i]}));
+    const traces = tracts.map((trace, i) => ({...trace, visible: visible[i]}));
     const layout = {
       paper_bgcolor: "black", plot_bgcolor: "black", margin: {l: 0, r: 0, t: 0, b: 0},
       showlegend: false, uirevision: "fat-camera",
@@ -46,8 +48,10 @@ async function showAlgorithm() {
         yaxis: {visible: false, autorange: false, range: [-100, 110]},
         zaxis: {visible: false, autorange: false, range: [-95, 92]}}
     };
+    if (cortex) { cortex.destroy(); cortex = null; }
     await Plotly.react(viewer, traces, layout, {displayModeBar: false, scrollZoom: true, responsive: true});
     applySkyLight(viewer);
+    cortex = addCortexToon(viewer, surface, {foldLines: folds.checked, visible: contours.checked});
     ready = true;
     current = requested;
     viewer.dataset.algorithm = current;
@@ -61,14 +65,14 @@ async function showAlgorithm() {
 }
 
 algorithm.addEventListener("change", showAlgorithm);
-for (const input of [side, brain]) {
-  input.addEventListener("change", async () => {
-    if (ready) await Plotly.restyle(viewer, {visible: visibility()});
-  });
-}
-document.getElementById("reset").addEventListener("click", async () => {
-  if (ready) await Plotly.relayout(viewer, {"scene.camera": frontCamera()});
+side.addEventListener("change", async () => {
+  if (ready) {
+    await Plotly.restyle(viewer, {visible: visibility()});
+    applySkyLight(viewer);
+  }
 });
+folds.addEventListener("change", () => cortex?.set({foldLines: folds.checked}));
+contours.addEventListener("change", () => cortex?.set({visible: contours.checked}));
 viewer.addEventListener("plotly_webglcontextlost", () => {
   status.textContent = "The 3D graphics context was lost. Reload the page.";
 });
@@ -76,7 +80,7 @@ viewer.addEventListener("plotly_webglcontextlost", () => {
 (async () => {
   try {
     if (typeof Plotly === "undefined") throw new Error("The 3D library could not load");
-    brainMesh = await loadJSON("brain");
+    surface = await loadJSON("cortex");
     await showAlgorithm();
   } catch (error) {
     status.textContent = `${error.message}. Reload the page to retry.`;

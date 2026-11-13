@@ -78,6 +78,7 @@ def main() -> None:
         separator = "&" if "?" in args.url else "?"
         browser.call("Page.navigate", dict(url=f"{args.url}{separator}geometry-check={time.time()}"))
         browser.wait_for("document.getElementById('viewer')?.dataset.algorithm === 'iFOD2'")
+        browser.wait_for("Boolean(document.querySelector('canvas[data-toon-ready]'))")
         algorithms = browser.evaluate("Array.from(document.getElementById('algorithm').options, o => o.value)")
         reference = browser.state()
         for algorithm in algorithms:
@@ -85,6 +86,7 @@ def main() -> None:
                              "document.getElementById('algorithm').dispatchEvent(new Event('change'));true")
             browser.wait_for(f"document.getElementById('viewer').dataset.algorithm === {json.dumps(algorithm)}"
                              " && !document.getElementById('algorithm').disabled")
+            browser.wait_for("Boolean(document.querySelector('canvas[data-toon-ready]'))")
             if not browser.evaluate("""Object.values(document.getElementById('viewer')._fullLayout.scene._scene.traces)
                 .every(({mesh}) => mesh.gl.getProgramParameter(mesh.triShader.program, mesh.gl.LINK_STATUS)
                   && mesh.gl.getShaderSource(mesh.triShader.vertShader).includes('skyPosition - worldPosition.xyz'))"""):
@@ -92,19 +94,21 @@ def main() -> None:
             for side in ("both", "left", "right"):
                 browser.evaluate(f"document.getElementById('side').value={json.dumps(side)};"
                                  "document.getElementById('side').dispatchEvent(new Event('change'));true")
+                browser.wait_for(f"viewer.data[0].visible === {json.dumps(side != 'right')} && "
+                                 f"viewer.data[1].visible === {json.dumps(side != 'left')}")
                 for visible in (False, True):
-                    browser.evaluate("document.getElementById('brain').click();true")
-                    browser.wait_for("document.getElementById('viewer').data[0].visible === "
-                                     + json.dumps(visible))
+                    browser.evaluate("document.getElementById('contours').click();true")
+                    browser.wait_for("cortex.canvas.style.display === "
+                                     + json.dumps("block" if visible else "none"))
                     state = browser.state()
                     if not same_values(reference, state):
-                        raise AssertionError(f"Geometry changed for {algorithm}/{side}/brain={visible}: "
+                        raise AssertionError(f"Geometry changed for {algorithm}/{side}/contours={visible}: "
                                              f"{reference} -> {state}")
                     scales = [size / (bounds[1] - bounds[0])
                               for size, bounds in zip(state["aspect"], state["ranges"])]
                     if not all(math.isclose(v, scales[0], abs_tol=1e-12) for v in scales):
                         raise AssertionError(f"Unequal physical scale: {scales}")
-            print(f"{algorithm}: all sides and brain off/on preserve camera, scale and proportions.", flush=True)
+            print(f"{algorithm}: all sides and contours off/on preserve camera, scale and proportions.", flush=True)
     finally:
         browser.connection.close()
 

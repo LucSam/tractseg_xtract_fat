@@ -7,10 +7,14 @@ and a brain-extracted T1, using HCP1065 atlas masks and cortical target regions.
 `fat.sh` runs iFOD2 with 2000 streamlines per side by default. Tracking algorithms,
 streamline counts and mask settings are selectable through command-line options.
 
-[![FAT in direction RGB with fixed skylight reflections — open the 3D viewer](assets/fat_3d.png?v=2)](https://lucsam.github.io/tractseg_xtract_fat/)
+[![Reflective FAT tracts with fine cortical contours — open the 3D viewer](assets/fat_3d.png?v=3)](https://lucsam.github.io/tractseg_xtract_fat/)
 
 [Open the 3D viewer](https://lucsam.github.io/tractseg_xtract_fat/) to rotate the
-tracts and select iFOD2, SD_STREAM, FACT, Tensor_Det or Tensor_Prob.
+tracts and select iFOD2, SD_STREAM, FACT, Tensor_Det or Tensor_Prob. FastSurfer
+pial surfaces provide fine gray cortical contours without a surface fill.
+Toggle **Fold lines** for internal detail or **Contours** for the whole outline.
+The viewer opens straight-on; a fixed upper-left frontal light produces tract
+reflections and varies contour thickness as you rotate the brain.
 
 ## Table of contents
 
@@ -355,8 +359,19 @@ containment and endpoint connections, followed by ShellCheck, Ruff and mypy.
 
 For the viewer's tube geometry, run `node --test tests/viewer_mesh.test.cjs`
 with Node.js installed. The optional browser check is described in
-`tests/viewer_geometry_check.py`. To verify the fixed skylight and regenerate
-the preview image, see `tests/viewer_lighting_check.py`.
+`tests/viewer_geometry_check.py`. Contour color, visibility, rotation, zoom and
+display scaling are checked by `tests/viewer_cortex_check.py`. To verify the
+fixed skylight and regenerate the preview image, see `tests/viewer_lighting_check.py`.
+
+The public viewer lives in `docs/`. `scripts/build_viewer.py` exports the checked
+tract display subsets. `scripts/build_cortex_viewer.py` transforms completed
+FastSurfer pial surfaces from tkregister RAS through native T1 space into DWI
+space using the existing registration. It preserves the reconstructed topology,
+exports `docs/data/cortex.json`, and bundles the same viewer into
+`results/fastsurfer/tract_preview.html` for local use. This optional exporter
+requires ANTsPy, NiBabel, NumPy, pandas, PyVista and Matplotlib; its `--help` lists
+the subject, registration, T1 and output paths. MRI volumes, native reconstruction
+files and local QC remain outside Git.
 
 ## Attribution
 

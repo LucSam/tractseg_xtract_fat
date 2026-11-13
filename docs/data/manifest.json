@@ -9,5 +9,10 @@
   "streamlines_per_side": 2000,
   "displayed_per_side": 500,
   "colours": "Absolute RAS tangent: red left-right, green anterior-posterior, blue inferior-superior",
-  "source": "HCP1065 FAT workflow example; Lucius Fekonja"
+  "source": "HCP1065 FAT workflow example; Lucius Fekonja",
+  "cortex": {
+    "file": "cortex.json",
+    "source": "FastSurfer reconstructed pial surfaces",
+    "coordinates": "DWI scanner RAS (mm)"
+  }
 }

@@ -2,9 +2,13 @@
 
 // Plotly 2.32.0's mesh shader mixes view-space positions with object-space
 // light/eye coordinates. Keep lighting in world space instead: a distant
-// overhead light stays put, and only the eye moves when the scene is rotated.
+// upper-left, frontal light stays put, and only the eye moves when the scene is rotated.
 // This small adapter targets the bundled Plotly renderer; keep the browser
 // lighting check when upgrading it. Geometry and material shading stay intact.
+// World coordinates: projects above-left in the viewer's initial frontal view.
+// Contour rendering uses this same position so lines and tubes agree.
+const SKY_LIGHT_POSITION = Object.freeze([6.0, 4.0, 7.0]);
+
 const skyLightVertexShader = `
 precision highp float;
 attribute vec3 position, normal;
@@ -18,7 +22,7 @@ varying vec2 f_uv;
 void main() {
   vec4 worldPosition = model * vec4(position, 1.0);
   gl_Position = projection * view * worldPosition;
-  vec3 skyPosition = vec3(-3.0, 4.0, 8.0);
+  vec3 skyPosition = vec3(${SKY_LIGHT_POSITION.map(value => value.toFixed(1)).join(", ")});
   vec3 eyeWorld = -view[3].xyz * mat3(view);
   f_lightDirection = skyPosition - worldPosition.xyz;
   f_eyeDirection = eyeWorld - worldPosition.xyz;

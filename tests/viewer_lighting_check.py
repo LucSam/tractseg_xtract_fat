@@ -46,8 +46,9 @@ def main() -> None:
         separator = "&" if "?" in args.url else "?"
         browser.call("Page.navigate", dict(url=f"{args.url}{separator}lighting-check={time.time()}"))
         browser.wait_for("document.getElementById('viewer')?.dataset.algorithm === 'iFOD2'")
+        browser.wait_for("Boolean(document.querySelector('canvas[data-toon-ready]'))")
         # A horizontal mirror-like square must shine toward the reflected sky
-        # direction (+3,-4,+8), and dim when viewed from the opposite azimuth.
+        # direction (-light.x,-light.y,+light.z), and dim from the opposite azimuth.
         # Its centre stays at the same screen position in both views.
         evaluate(browser, """(async () => {
           const probe = document.createElement('div');
@@ -61,13 +62,13 @@ def main() -> None:
             lighting:{ambient:0,diffuse:0,specular:1,roughness:0.2,fresnel:0.3}}],
             {paper_bgcolor:'black',margin:{l:0,r:0,t:0,b:0},scene:{bgcolor:'black',
               xaxis:axis,yaxis:axis,zaxis:axis,aspectmode:'cube',
-              camera:{eye:{x:0.6,y:-0.8,z:1.6},up:{x:0,y:0,z:1}}}},
+              camera:{eye:{x:-SKY_LIGHT_POSITION[0]*.2,y:-SKY_LIGHT_POSITION[1]*.2,z:SKY_LIGHT_POSITION[2]*.2},up:{x:0,y:0,z:1}}}},
             {displayModeBar:false});
           applySkyLight(probe);
         })()""")
         reflected = np.asarray(Image.open(BytesIO(capture(browser, 512))).convert("RGB"))
         evaluate(browser, """Plotly.relayout(document.getElementById('lighting-probe'), {
-          'scene.camera.eye':{x:-0.6,y:0.8,z:1.6}})""")
+          'scene.camera.eye':{x:SKY_LIGHT_POSITION[0]*.2,y:SKY_LIGHT_POSITION[1]*.2,z:SKY_LIGHT_POSITION[2]*.2}})""")
         opposite = np.asarray(Image.open(BytesIO(capture(browser, 512))).convert("RGB"))
         bright = float(reflected[248:264, 248:264].mean())
         dark = float(opposite[248:264, 248:264].mean())
@@ -89,7 +90,7 @@ def main() -> None:
               plot.style.width='1400px'; plot.style.height='1400px';
               await Plotly.Plots.resize(plot);
               await Plotly.relayout(plot, {'scene.camera':{
-                eye:{x:0.24,y:1.1,z:0.18},up:{x:0,y:0,z:1},center:{x:0,y:0,z:0.02}}});
+                eye:{x:0,y:1.15,z:0},up:{x:0,y:0,z:1},center:{x:0,y:0,z:0}}});
             })()""")
             args.preview.write_bytes(capture(browser, 1400))
             print(f"Saved preview: {args.preview}", flush=True)

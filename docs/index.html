@@ -5,11 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FAT · Lucius Fekonja</title>
   <meta name="description" content="Explore the Frontal Aslant Tract in 3D and compare tracking algorithms.">
-  <link rel="stylesheet" href="viewer.css">
+  <link rel="stylesheet" href="viewer.css?v=2">
   <script defer src="vendor/plotly.min.js"></script>
   <script defer src="tract-mesh.js?v=2"></script>
-  <script defer src="sky-light.js?v=1"></script>
-  <script defer src="viewer.js?v=4"></script>
+  <script defer src="sky-light.js?v=2"></script>
+  <script defer src="cortex-toon.js?v=1"></script>
+  <script defer src="viewer.js?v=5"></script>
 </head>
 <body>
   <header>
@@ -23,8 +24,8 @@
     <label>Side
       <select id="side"><option value="both">Both</option><option value="left">Left</option><option value="right">Right</option></select>
     </label>
-    <label class="checkbox"><input id="brain" type="checkbox" checked> Brain</label>
-    <button id="reset" type="button">Front view</button>
+    <label class="checkbox"><input id="folds" type="checkbox" checked> Fold lines</label>
+    <label class="checkbox"><input id="contours" type="checkbox" checked> Contours</label>
     <a class="repository" href="https://github.com/LucSam/tractseg_xtract_fat">Tutorial ↗</a>
   </header>
   <main id="viewer" aria-label="Interactive 3D Frontal Aslant Tract; drag to rotate and scroll to zoom"></main>

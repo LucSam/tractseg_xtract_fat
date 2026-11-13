@@ -1,7 +1,8 @@
 """Export a lightweight display subset from checked TCK files for GitHub Pages.
 
-Development only: requires plotly and scikit-image in addition to the workflow packages.
+Development only: requires plotly in addition to the workflow packages.
 Usage: python3 scripts/build_viewer.py --fod-results RESULTS --extra-results RESULTS
+Export cortical geometry separately with scripts/build_cortex_viewer.py.
 """
 
 import argparse
@@ -12,25 +13,12 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 from plotly.offline import get_plotlyjs
-from scipy.ndimage import gaussian_filter
-from skimage.measure import marching_cubes
 
 qc = types.ModuleType("fat_qc")
 source = (Path(__file__).resolve().parents[1] / "fat.sh").read_text()
 embedded = source.split("<<'FAT_QC_PY'\n", 1)[1].split("\nFAT_QC_PY\n", 1)[0]
 exec(compile(embedded, "fat.sh", "exec"), qc.__dict__)
 check_tracks, load_nifti, same_grid = qc.check_tracks, qc.load_nifti, qc.same_grid
-
-
-def mesh(path: Path) -> dict:
-    img = load_nifti(path)
-    field = gaussian_filter((np.asanyarray(img.dataobj) > 0).astype(np.float32), 0.8)
-    vertices, faces, _, _ = marching_cubes(field, 0.5, step_size=3)
-    vertices = nib.affines.apply_affine(img.affine, vertices).round(2)
-    return dict(type="mesh3d", x=vertices[:, 0].tolist(), y=vertices[:, 1].tolist(),
-                z=vertices[:, 2].tolist(), i=faces[:, 0].tolist(), j=faces[:, 1].tolist(),
-                k=faces[:, 2].tolist(), color="#c7ced6", opacity=0.08,
-                hoverinfo="skip", showscale=False, showlegend=False, name="Brain")
 
 
 def tracks(path: Path, side: str) -> dict:
@@ -69,8 +57,6 @@ def main() -> None:
     vendor.mkdir(exist_ok=True)
     (vendor / "plotly.min.js").write_text(get_plotlyjs())
     (args.out / ".nojekyll").touch()
-    brain = mesh(args.fod_results / "work/atlas/t1_dwi.nii.gz")
-    (data_dir / "brain.json").write_text(json.dumps(brain, separators=(",", ":")))
     algorithms = ["iFOD2", "SD_STREAM", "FACT", "Tensor_Det", "Tensor_Prob"]
     for algorithm in algorithms:
         folder = args.fod_results if algorithm in algorithms[:2] else args.extra_results
@@ -93,6 +79,8 @@ def main() -> None:
         algorithms=algorithms, streamlines_per_side=2000, displayed_per_side=500,
         colours="Absolute RAS tangent: red left-right, green anterior-posterior, blue inferior-superior",
         source="HCP1065 FAT workflow example; Lucius Fekonja",
+        cortex=dict(file="cortex.json", source="FastSurfer reconstructed pial surfaces",
+                    coordinates="DWI scanner RAS (mm)"),
     ), indent=2) + "\n")
 
 
